@@ -1,13 +1,58 @@
+// NEW HELPER FUNCTION FOR CURRENCY CONVERSION
+/**
+ * Fetches the exchange rate from a base currency to a target currency (EUR).
+ * @param {string} fromCurrency The currency code to convert from (e.g., "USD").
+ * @param {SafeCache} cache The cache instance to use.
+ * @return {number|null} The exchange rate, or null if an error occurs.
+ */
+function getExchangeRate(fromCurrency, cache) {
+  if (fromCurrency === "EUR") {
+    return 1; // No conversion needed
+  }
+  const toCurrency = "EUR";
+  const cacheKey = `rate_${fromCurrency}_${toCurrency}`;
+  
+  const cached = cache.get(cacheKey);
+  if (cached) {
+    console.log(`Cache hit (rate): ${cacheKey}`);
+    return JSON.parse(cached);
+  }
+
+  // Using a free, no-key-required API: exchangerate.host
+  let url = `https://api.exchangerate.host/latest?base=${fromCurrency}&symbols=${toCurrency}`;
+  url += "&cacheBust=" + new Date().getTime(); // Cache busting
+
+  try {
+    const res = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+    const data = JSON.parse(res.getContentText());
+    
+    if (data.success && data.rates && data.rates[toCurrency]) {
+      const rate = data.rates[toCurrency];
+      console.log(`Fetched exchange rate ${fromCurrency}->${toCurrency}: ${rate}`);
+      // Cache for 1 hour, as rates don't change that frequently
+      cache.put(cacheKey, JSON.stringify(rate), 3600); 
+      return rate;
+    } else {
+      console.error(`Failed to fetch exchange rate for ${fromCurrency}`);
+      return null;
+    }
+  } catch (err) {
+    console.error("Error fetching exchange rate:", err);
+    return null;
+  }
+}
+
 
 function isNullOrEmpty(str) {
   return !str || str.trim() === "";
 }
 
 function roundValue(value) {
-  if (typeof value !== "number") {
+  const number = Number(value);
+  if (isNaN(number)) {
     return value; // return original if not a number
   }
-  return value != null ? Math.round(value * 100) / 100 : null;
+  return value != null ? Math.round(number * 100) / 100 : null;
 }
 
 /**
@@ -15,7 +60,7 @@ function roundValue(value) {
  */
 function yahooF(ticker, property) {
   // ticker = "IWDA.AS";
-  // property = "regularMarketPrice";
+  // property = "longName";
 
   if (!ticker || !property) {
     console.log(`invalid ticker${ticker} or property ${property}`);
@@ -41,11 +86,15 @@ function yahooF(ticker, property) {
 }
 
 function yahooF_single_cached(ticker, property) {
-  const cache = CacheService.getScriptCache();
+  const cache = new SafeCache(CacheService.getScriptCache(), {
+    version: "10", // Increment version to invalidate old caches
+    perUser: true,
+    enable: true,
+  });
   const cacheKey = `yahooF_${ticker}_${property}`;
   // cache.remove(cacheKey);
   let cached = cache.get(cacheKey);
-  cached = cached ? Number(cached) : null;
+  cached = roundValue(cached);
 
   // ? Return cached value if available
   if (cached) {
@@ -53,7 +102,9 @@ function yahooF_single_cached(ticker, property) {
     return cached;
   }
 
-  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${ticker}`;
+  let url = `https://query1.finance.yahoo.com/v8/finance/chart/${ticker}`;
+  url += "?cacheBust=" + new Date().getTime(); // <-- FIX: Cache Busting
+  console.log(url);
   try {
     const res = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
     const data = JSON.parse(res.getContentText());
@@ -112,13 +163,35 @@ function isSunday(date) {
 
 function yahooHistory(ticker, startDateParam, endDateParam) {
   // 1. --- SETUP & VALIDATION ---
+  
+  // console.log("test:");
+  // ticker = "IWDA.AS";
+  // // ticker = "TLV.RO";
+  // let todayTest = new Date();
+  // todayTest.setHours(0,0,0,0);
+  // startDateParam = new Date();
+  // startDateParam.setHours(0,0,0,0);
+  
+  // // test: today test
+  // // startDateParam.setDate(todayTest.getDate());
+  
+  // // test: another day in the past 
+  // // startDateParam.setDate(todayTest.getDate()-30);
+  
+  // // test: range last 10 days
+  // startDateParam.setDate(todayTest.getDate()-5);
+  // endDateParam = new Date();
+  // endDateParam.setHours(0,0,0,0);
+  // endDateParam.setDate(todayTest.getDate());
+  
+  
   if (isNullOrEmpty(ticker)) {
     return "Ticker required";
   }
 
   // Instantiate the cache. Remove clearAll() for production use.
   const cache = new SafeCache(CacheService.getScriptCache(), {
-    version: "9", // Increment version to invalidate old caches
+    version: "10", // Increment version to invalidate old caches
     perUser: true,
     enable: true,
   });
@@ -155,7 +228,9 @@ function yahooHistory(ticker, startDateParam, endDateParam) {
  * Fetches the current market price for a given ticker.
  */
 function fetchTodaysPrice(ticker, cache) {
-  const cacheKey = `price_${ticker}_today`;
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const cacheKey = `price_${ticker}_today_${today.getTime()}`;
   const cached = cache.get(cacheKey);
   if (cached) {
     console.log(`Cache hit (today): ${cacheKey}`);
@@ -189,6 +264,7 @@ function fetchHistoricalData(ticker, start, end, cache, isSingleDayRequest) {
   const endTs = Math.floor(end.getTime() / 1000);
 
   const cacheKey = `hist_${ticker}_${start.getTime()}_${end.getTime()}`;
+  // cache.remove(cacheKey);
   const cached = cache.get(cacheKey);
   if (cached) {
     console.log(`Cache hit (historical): ${cacheKey}`);
@@ -223,6 +299,7 @@ function fetchHistoricalData(ticker, start, end, cache, isSingleDayRequest) {
     if (isSingleDayRequest) {
       const output = roundValue(closes[0]);
       cache.put(cacheKey, JSON.stringify(output), 60 * 60 * 6); // cache 6 hours
+      // cache.put(cacheKey, JSON.stringify(output), 10); // cache 10 seconds
       return output;
     }
 
@@ -236,6 +313,7 @@ function fetchHistoricalData(ticker, start, end, cache, isSingleDayRequest) {
     
     if (output.length > 1) {
       cache.put(cacheKey, JSON.stringify(output), 60 * 60 * 6); // cache 6 hours
+      // cache.put(cacheKey, JSON.stringify(output),  10); // cache 10 seconds
     }
     return output;
 
