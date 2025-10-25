@@ -109,180 +109,139 @@ function isSunday(date) {
   return day === 0;
 }
 
-class DummyCache {
-  constructor() {
+
+function yahooHistory(ticker, startDateParam, endDateParam) {
+  // 1. --- SETUP & VALIDATION ---
+  if (isNullOrEmpty(ticker)) {
+    return "Ticker required";
   }
-  put(key, content, timeMs = null) {
+
+  // Instantiate the cache. Remove clearAll() for production use.
+  const cache = new SafeCache(CacheService.getScriptCache(), {
+    version: "9", // Increment version to invalidate old caches
+    perUser: true,
+    enable: true,
+  });
+  // cache.clearAll(); // Only use for debugging, then comment out
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  let start = startDateParam ? sheetDateToJS(startDateParam) : null;
+  let end = endDateParam ? sheetDateToJS(endDateParam) : null;
+
+  // 2. --- DETERMINE FETCH TYPE (TODAY, SINGLE DAY, OR RANGE) ---
+
+  // Case 1: Fetching for today's current price
+  if (start && !end && start.getTime() === today.getTime()) {
+    return fetchTodaysPrice(ticker, cache);
   }
-  get(key) {
-    return 0;
+
+  // Case 2: Fetching for a historical range or single day
+  // Default to last 30 days if no start date is provided
+  if (!start) {
+    start = new Date(today.getTime() - 30 * 24 * 60 * 60 * 1000);
+    end = today;
+  }
+  // If only start date is provided, set end date to be one day after for the query
+  if (start && !end) {
+    end = new Date(start.getTime() + 24 * 60 * 60 * 1000);
+  }
+
+  return fetchHistoricalData(ticker, start, end, cache, !endDateParam && !!startDateParam);
+}
+
+/**
+ * Fetches the current market price for a given ticker.
+ */
+function fetchTodaysPrice(ticker, cache) {
+  const cacheKey = `price_${ticker}_today`;
+  const cached = cache.get(cacheKey);
+  if (cached) {
+    console.log(`Cache hit (today): ${cacheKey}`);
+    return JSON.parse(cached);
+  }
+
+  let url = `https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?interval=1m&range=1d`;
+  url += "&cacheBust=" + new Date().getTime(); // <-- FIX: Cache Busting
+  console.log("Fetching today's price from URL: " + url);
+
+  try {
+    const res = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+    const data = JSON.parse(res.getContentText());
+    const meta = data.chart.result[0].meta;
+    const currentPrice = roundValue(meta.regularMarketPrice);
+
+    cache.put(cacheKey, JSON.stringify(currentPrice), 60); // cache 1 minute
+    console.log(`Fetched and cached today's price: ${currentPrice}`);
+    return currentPrice;
+  } catch (err) {
+    console.error("Error fetching today's price:", err);
+    return "Error fetching price";
   }
 }
 
-
-function yahooHistory(ticker, startDateParam, endDateParam) {
-  const USE_CACHE = true;
-  const userKey = 'result_' + Session.getTemporaryActiveUserKey(); // unique per user
-  const globalKey = userKey
-                    // + new Date().getTime();
-  console.log(globalKey);
-
-
-  // console.log("test:");
-  // // ticker = "IWDA.AS";
-  // ticker = "TLV.RO";
-  // let todayTest = new Date();
-  // todayTest.setHours(0,0,0,0);
-  // startDateParam = new Date();
-  // startDateParam.setHours(0,0,0,0);
-  
-  // test: today test
-  // startDateParam.setDate(todayTest.getDate());
-  
-  // test: another day in the past 
-  // startDateParam.setDate(todayTest.getDate()-10);
-
-  // test: range last 10 days
-  // startDateParam.setDate(todayTest.getDate()-5);
-  // endDateParam = new Date();
-  // endDateParam.setHours(0,0,0,0);
-  // endDateParam.setDate(todayTest.getDate());
-  
-  // let cache = CacheService.getScriptCache();
-  let cache = CacheService.getUserCache();
-  if (USE_CACHE == false)
-    cache = new DummyCache();
-
-  console.log(ticker, "-----", startDateParam, "-----", endDateParam);
-
-  if (!ticker) {
-    console.log("ticker required");
-    return null;
-    // return [["Ticker required"]];
-  }
-
-  const today = new Date();
-  today.setHours(0, 0, 0, 0); // normalize to midnight
-
-  let start = startDateParam ? sheetDateToJS(startDateParam) : new Date(today.getTime() - 30 * 24 * 60 * 60 * 1000); // 30 days
-  let end;
-
-  if (!endDateParam) {
-    if (startDateParam) {
-      // Only startDate provided ? single-day fetch
-      const isToday = start.getTime() === today.getTime();
-
-      if (isToday) {
-        const cacheKey = `price_${ticker}_today`;
-        // cache.remove(cacheKey);
-        const cached = cache.get(cacheKey);
-        if (cached) {
-          const returnVal = JSON.parse(cached);
-          console.log(`Cache hit: ${cacheKey}, value: ${returnVal}, type: ${typeof(returnVal)}`);
-          return returnVal;
-        }
-        // Fetch current market price
-        const urlPrice = `https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?interval=1m&range=1d`;
-        console.log(urlPrice);
-        try {
-          const resPrice = UrlFetchApp.fetch(urlPrice);
-          const dataPrice = JSON.parse(resPrice.getContentText());
-          const meta = dataPrice.chart.result[0].meta;
-          const currentPrice = roundValue(meta.regularMarketPrice);
-          cache.put(cacheKey, JSON.stringify(currentPrice), 60); // cache 1 minute
-          console.log(`fetched current price: ${currentPrice}, type: ${typeof(currentPrice)}`);
-
-          return currentPrice;
-        } catch (err) {
-          return [["Unable to fetch current price: " + err.toString()]];
-        }
-      } else {
-        // Historical day ? fetch that day
-        end = new Date(start.getTime() + 24 * 60 * 60 * 1000); // one day after
-      }
-    } else {
-      // No dates ? last 30 days
-      end = today;
-    }
-  } else {
-    // Both dates provided ? normal behavior
-    end = sheetDateToJS(endDateParam);
-  }
-
-  // If we reach here, fetch historical data
+/**
+ * Fetches historical close prices for a ticker between two dates.
+ */
+function fetchHistoricalData(ticker, start, end, cache, isSingleDayRequest) {
   const startTs = Math.floor(start.getTime() / 1000);
   const endTs = Math.floor(end.getTime() / 1000);
 
-  
-  // !!!!!!!!!!!!!!!!   TODO some other time. nu inteleg de ce imi intra pe cached desi eu nu fac cache.put si dau cache.remove la cacheKey. 
-  const cacheKey = `${globalKey}_hist_${ticker}_${start.getTime()}_${end.getTime()}`;
-  // cache.remove(cacheKey); 
+  const cacheKey = `hist_${ticker}_${start.getTime()}_${end.getTime()}`;
   const cached = cache.get(cacheKey);
-  if (cached) { 
-    const returnVal = JSON.parse(cached);
-    console.log(`Cache hit: ${cacheKey}, type: ${typeof(returnVal)}`);
-    console.log(returnVal);
-    return returnVal;
+  if (cached) {
+    console.log(`Cache hit (historical): ${cacheKey}`);
+    return JSON.parse(cached);
   }
 
   let url = `https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?period1=${startTs}&period2=${endTs}&interval=1d`;
-  console.log(url);
-  try {
-    let res = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
-    let data = JSON.parse(res.getContentText());
+  url += "&cacheBust=" + new Date().getTime(); // <-- FIX: Cache Busting
+  console.log("Fetching historical data from URL: " + url);
 
-    if (!data.chart || !data.chart.result || !data.chart.result[0]) {
-      return [["No data"]];
+  try {
+    const res = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+    const data = JSON.parse(res.getContentText());
+
+    if (!data.chart?.result?.[0]?.timestamp) {
+      // Handle weekends for single day requests by looking back
+      if (isSingleDayRequest && isWeekend(start)) {
+        const prevDay = new Date(start);
+        const daysToSubtract = isSunday(start) ? 2 : 1;
+        prevDay.setDate(start.getDate() - daysToSubtract);
+        console.log(`${start.toDateString()} is a weekend, trying ${prevDay.toDateString()} instead.`);
+        // Call itself recursively for the previous non-weekend day
+        return fetchHistoricalData(ticker, prevDay, start, cache, true);
+      }
+      return "No data";
     }
 
-    let result = data.chart.result[0];
-    let timestamps = result.timestamp;
-    let closes = result.indicators.quote[0].close;
+    const timestamps = data.chart.result[0].timestamp;
+    const closes = data.chart.result[0].indicators.quote[0].close;
 
-    // Single day historical ? return value
-    if (!endDateParam && startDateParam && start.getTime() !== today.getTime()) {
-      if (!closes && isWeekend(start)) {
-        console.log(`day is weekend`);
-        const one_day = 24 * 60 * 60;
-        let diff = one_day;
-        if (isSunday(start))
-          diff = one_day * 2;
-        url = `https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?period1=${startTs-diff}&period2=${endTs-diff}&interval=1d`;
-        console.log(url);
-        res = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
-        data = JSON.parse(res.getContentText());
-
-        if (!data.chart || !data.chart.result || !data.chart.result[0]) {
-          return [["No data"]];
-        }
-
-        result = data.chart.result[0];
-        timestamps = result.timestamp;
-        closes = result.indicators.quote[0].close;
-      }
-      
+    // If it was a single day request, return just the value
+    if (isSingleDayRequest) {
       const output = roundValue(closes[0]);
       cache.put(cacheKey, JSON.stringify(output), 60 * 60 * 6); // cache 6 hours
-      console.log(`fetched current price: ${output}, type: ${typeof(output)}`);
       return output;
     }
 
-    // Range ? return 2D array
+    // Otherwise, build the 2D array for a range
     const output = [["Date", "Close"]];
     for (let i = 0; i < timestamps.length; i++) {
-      const date = new Date(timestamps[i] * 1000);
-      const price = closes[i];
-      if (price != null) output.push([date, price]);
+      if (closes[i] != null) {
+        output.push([new Date(timestamps[i] * 1000), roundValue(closes[i])]);
+      }
     }
-
-    cache.put(cacheKey, JSON.stringify(output), 60 * 60 * 6); // cache 6 hours
-    console.log(`fetched current prices, type: ${typeof(output)}`);
-    console.log(output);
+    
+    if (output.length > 1) {
+      cache.put(cacheKey, JSON.stringify(output), 60 * 60 * 6); // cache 6 hours
+    }
     return output;
 
   } catch (err) {
-    console.error(err.toString());
-    return [[err.toString()]];
+    console.error("Error fetching historical data:", err);
+    return "Error fetching data";
   }
 }
 
