@@ -63,7 +63,7 @@ function yahooF(ticker, property) {
   // property = "longName";
 
   if (!ticker || !property) {
-    console.log(`invalid ticker${ticker} or property ${property}`);
+    console.error(`invalid ticker${ticker} or property ${property}`);
     return null;
   }
   // Handle range input (ARRAYFORMULA)
@@ -186,6 +186,7 @@ function yahooHistory(ticker, startDateParam, endDateParam) {
   
   
   if (isNullOrEmpty(ticker)) {
+    console.error("ticker required");
     return "Ticker required";
   }
 
@@ -300,6 +301,7 @@ function fetchHistoricalData(ticker, start, end, cache, isSingleDayRequest) {
       const output = roundValue(closes[0]);
       cache.put(cacheKey, JSON.stringify(output), 60 * 60 * 6); // cache 6 hours
       // cache.put(cacheKey, JSON.stringify(output), 10); // cache 10 seconds
+      console.log(`Fetched and cached singeDay's price: ${output}`);
       return output;
     }
 
@@ -315,6 +317,7 @@ function fetchHistoricalData(ticker, start, end, cache, isSingleDayRequest) {
       cache.put(cacheKey, JSON.stringify(output), 60 * 60 * 6); // cache 6 hours
       // cache.put(cacheKey, JSON.stringify(output),  10); // cache 10 seconds
     }
+    console.log(`Fetched and cached historical data price: ${output}`);
     return output;
 
   } catch (err) {
