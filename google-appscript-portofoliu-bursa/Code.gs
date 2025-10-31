@@ -11,7 +11,7 @@ function getExchangeRate(fromCurrency, cache) {
   }
   const toCurrency = "EUR";
   const cacheKey = `rate_${fromCurrency}_${toCurrency}`;
-  
+
   const cached = cache.get(cacheKey);
   if (cached) {
     console.log(`Cache hit (rate): ${cacheKey}`);
@@ -25,12 +25,12 @@ function getExchangeRate(fromCurrency, cache) {
   try {
     const res = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
     const data = JSON.parse(res.getContentText());
-    
+
     if (data.success && data.rates && data.rates[toCurrency]) {
       const rate = data.rates[toCurrency];
       console.log(`Fetched exchange rate ${fromCurrency}->${toCurrency}: ${rate}`);
       // Cache for 1 hour, as rates don't change that frequently
-      cache.put(cacheKey, JSON.stringify(rate), 3600); 
+      cache.put(cacheKey, JSON.stringify(rate), 3600);
       return rate;
     } else {
       console.error(`Failed to fetch exchange rate for ${fromCurrency}`);
@@ -56,81 +56,499 @@ function roundValue(value) {
 }
 
 /**
+ * SafeCache - versioned, user-aware, optionally disabled cache wrapper
+ * for Google Apps Script.
+ */
+class SafeCache {
+  constructor(cache, options = {}) {
+    this.cache = cache;
+    this.version = options.version || "1";
+    this.perUser = options.perUser !== false; // default true
+    this.enabled = options.enable !== false;  // default true
+
+    let userKeyPart = "";
+    if (this.perUser) {
+      const fullUserKey = Session.getTemporaryActiveUserKey();
+      // Create a short hash of the user key to avoid cache key length limits (250 chars max)
+      const userHash = Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, fullUserKey)
+        .map(byte => (byte + 256).toString(36).slice(1))
+        .join('')
+        .substring(0, 8); // Use first 8 chars of hash
+      userKeyPart = userHash + "__";
+    }
+    this.globalPrefix = `v${this.version}_${userKeyPart}`;
+    this.KEY_TRACKER = `${this.globalPrefix}SAFE_CACHE_KEYS__`;
+  }
+
+  /** Store a value and remember the key */
+  put(key, value, ttlSeconds = 21600) {
+    if (!this.enabled) return; // skip if disabled
+    const fullKey = this.globalPrefix + key;
+    this.cache.put(fullKey, value, ttlSeconds);
+    this._trackKey(fullKey, ttlSeconds);
+  }
+
+  /** Retrieve a value */
+  get(key) {
+    if (!this.enabled) return null;
+    console.log(this.globalPrefix + key);
+    return this.cache.get(this.globalPrefix + key);
+  }
+
+  /** Retrieve multiple values */
+  getAll(keys) {
+    if (!this.enabled) return {};
+    const mappedKeys = keys.map(k => this.globalPrefix + k);
+    return this.cache.getAll(mappedKeys);
+  }
+
+  /** Remove specific key(s) */
+  remove(keys) {
+    if (!this.enabled) return;
+    if (!Array.isArray(keys)) keys = [keys];
+    const fullKeys = keys.map(k => this.globalPrefix + k);
+    this.cache.removeAll(fullKeys);
+    this._untrackKeys(fullKeys);
+  }
+
+  /** Remove all tracked keys for this version/user */
+  clearAll() {
+    if (!this.enabled) return;
+    const tracked = this._getTrackedKeys();
+    if (tracked.length > 0) {
+      this.cache.removeAll(tracked);
+    }
+    this.cache.remove(this.KEY_TRACKER);
+  }
+
+  /** Private: track new keys */
+  _trackKey(key, ttlSeconds) {
+    const tracked = this._getTrackedKeys();
+    if (!tracked.includes(key)) tracked.push(key);
+    this.cache.put(this.KEY_TRACKER, JSON.stringify(tracked), ttlSeconds);
+  }
+
+  /** Private: untrack removed keys */
+  _untrackKeys(keys) {
+    let tracked = this._getTrackedKeys();
+    tracked = tracked.filter(k => !keys.includes(k));
+    this.cache.put(this.KEY_TRACKER, JSON.stringify(tracked), 21600);
+  }
+
+  /** Private: get tracked keys */
+  _getTrackedKeys() {
+    const json = this.cache.get(this.KEY_TRACKER);
+    return json ? JSON.parse(json) : [];
+  }
+}
+
+/**
+ * YahooFinanceAPI - Class-based Yahoo Finance data fetcher with intelligent caching
+ * Manages its own cache internally to avoid parameter passing and unnecessary instantiation
+ */
+class YahooFinanceAPI {
+  constructor(options = {}) {
+    this.cache = new SafeCache(CacheService.getScriptCache(), {
+      version: "11", // Enhanced caching version
+      perUser: true,
+      enable: true,
+      ...options
+    });
+
+    // Define property categories for intelligent caching
+    this.staticProperties = ['currency', 'symbol', 'longName', 'shortName',
+      'instrumentType', 'exchangeName', 'fullExchangeName',
+      'firstTradeDate', 'timezone', 'exchangeTimezoneName'];
+
+    this.dynamicProperties = ['regularMarketPrice', 'regularMarketVolume',
+      'regularMarketDayHigh', 'regularMarketDayLow',
+      'fiftyTwoWeekHigh', 'fiftyTwoWeekLow', 'changePct',
+      'regularMarketTime', 'previousClose', 'chartPreviousClose'];
+  }
+
+  /**
+   * Get a property for a ticker (supports both single values and arrays)
+   * @param {string|Array} ticker - Single ticker or array of tickers
+   * @param {string} property - Property to fetch (e.g., 'regularMarketPrice', 'longName')
+   * @return {*} Property value or array of values
+   */
+  getProperty(ticker, property) {
+    if (!ticker || !property) {
+      console.error(`Invalid ticker: ${ticker} or property: ${property}`);
+      return null;
+    }
+
+    // Handle array input (ARRAYFORMULA)
+    if (Array.isArray(ticker)) {
+      const results = [];
+      for (let i = 0; i < ticker.length; i++) {
+        const t = ticker[i][0];
+        if (!t) {
+          results.push([""]);
+          continue;
+        }
+        const val = this._fetchSingleProperty(t, property);
+        results.push([val]);
+      }
+      return results;
+    }
+
+    // Single ticker case
+    return this._fetchSingleProperty(ticker, property);
+  }
+
+  /**
+   * Get historical data for a ticker
+   * @param {string} ticker - Ticker symbol
+   * @param {Date} startDate - Start date (optional)
+   * @param {Date} endDate - End date (optional)
+   * @return {*} Historical price data
+   */
+  getHistory(ticker, startDate, endDate) {
+    if (isNullOrEmpty(ticker)) {
+      console.error("ticker required");
+      return "Ticker required";
+    }
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    let start = startDate ? sheetDateToJS(startDate) : null;
+    let end = endDate ? sheetDateToJS(endDate) : null;
+
+    // Case 1: Fetching for today's current price
+    if (start && !end && start.getTime() === today.getTime()) {
+      return this._fetchTodaysPrice(ticker);
+    }
+
+    // Case 2: Single historical day (completed trading day)
+    if (start && !end && start.getTime() < today.getTime()) {
+      return this._fetchSingleHistoricalDay(ticker, start);
+    }
+
+    // Case 3: Historical range or default range
+    if (!start) {
+      start = new Date(today.getTime() - 30 * 24 * 60 * 60 * 1000);
+      end = today;
+    }
+    if (start && !end) {
+      end = new Date(start.getTime() + 24 * 60 * 60 * 1000);
+    }
+
+    return this._fetchHistoricalRange(ticker, start, end, !endDate && !!startDate);
+  }
+
+  /**
+   * Private method to fetch a single property with intelligent caching
+   */
+  _fetchSingleProperty(ticker, property) {
+    // First check if we have cached static metadata (30-day cache)
+    const staticCacheKey = `static_${ticker}`;
+    // If requesting static property we try to get it from cache
+    let staticData = this.staticProperties.includes(property) ? this.cache.get(staticCacheKey) : null;
+
+    if (staticData) {
+      staticData = JSON.parse(staticData);
+      // if we have it cached, return immediately
+      if (staticData[property] !== undefined) {
+        console.log(`Static cache hit for ${ticker}.${property}: ${staticData[property]}`);
+        return roundValue(staticData[property]);
+      }
+    }
+
+    // For dynamic properties, check recent cache (2-minute cache)
+    const dynamicCacheKey = `dynamic_${ticker}`;
+    // If requesting dynamic property we try to get it from cache
+    let dynamicData = this.dynamicProperties.includes(property) ? this.cache.get(dynamicCacheKey) : null;
+
+    if (dynamicData) {
+      dynamicData = JSON.parse(dynamicData);
+      // if we have it cached, return immediately
+      if (dynamicData[property] !== undefined) {
+        console.log(`Dynamic cache hit for ${ticker}.${property}: ${dynamicData[property]}`);
+        return roundValue(dynamicData[property]);
+      }
+    }
+
+    // Need to fetch from API
+    let url = `https://query1.finance.yahoo.com/v8/finance/chart/${ticker}`;
+    url += "?cacheBust=" + new Date().getTime();
+    console.log(`API call for ${ticker}.${property}: ${url}`);
+
+    try {
+      const res = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+      const data = JSON.parse(res.getContentText());
+
+      if (!data.chart?.result?.[0]) return null;
+
+      const meta = data.chart.result[0].meta;
+
+      // Cache static data indefinitely (30 days TTL) - only if we don't have it already
+      if (!staticData) {
+        const staticInfo = {};
+        this.staticProperties.forEach(prop => {
+          if (meta[prop] !== undefined) {
+            staticInfo[prop] = meta[prop];
+          }
+        });
+        this.cache.put(staticCacheKey, JSON.stringify(staticInfo), 30 * 24 * 60 * 60); // 30 days
+        console.log(`Cached static data for ${ticker}`);
+        staticData = staticInfo;
+      }
+
+      // Cache dynamic data for 2 minutes
+      const dynamicInfo = {};
+      this.dynamicProperties.forEach(prop => {
+        if (meta[prop] !== undefined) {
+          dynamicInfo[prop] = meta[prop];
+        }
+      });
+
+      // Handle special cases
+      if (!dynamicInfo.previousClose && meta.chartPreviousClose) {
+        dynamicInfo.previousClose = meta.chartPreviousClose;
+      }
+
+      this.cache.put(dynamicCacheKey, JSON.stringify(dynamicInfo), 120); // 2 minutes
+      console.log(`Cached dynamic data for ${ticker}`);
+
+      // Get the requested value
+      let value = null;
+      if (property === "changePct") {
+        const price = meta.regularMarketPrice;
+        const prev = meta.previousClose || meta.chartPreviousClose;
+        if (prev && price) value = ((price - prev) / prev) * 100;
+      } else {
+        // Try static data first, then dynamic, then meta directly
+        value = staticData[property] ?? dynamicInfo[property] ?? meta[property] ?? null;
+      }
+
+      value = roundValue(value);
+      console.log(`API fetch result for ${ticker}.${property}: ${value}`);
+      return value;
+
+    } catch (err) {
+      console.error(`Error fetching ${ticker}.${property}:`, err);
+      return null;
+    }
+  }
+
+  /**
+   * Private method to fetch today's current market price
+   */
+  _fetchTodaysPrice(ticker) {
+    // Use the dynamic cache from _fetchSingleProperty for consistency
+    const dynamicCacheKey = `dynamic_${ticker}`;
+    // Always fetch from dynamic cache since regularMarketPrice is always a dynamic property
+    let dynamicData = this.cache.get(dynamicCacheKey);
+
+    if (dynamicData) {
+      dynamicData = JSON.parse(dynamicData);
+      // if we have it cached, return immediately
+      if (dynamicData.regularMarketPrice !== undefined) {
+        console.log(`Dynamic cache hit for today's price ${ticker}: ${dynamicData.regularMarketPrice}`);
+        return roundValue(dynamicData.regularMarketPrice);
+      }
+    }
+
+    // If not in cache, fetch via the enhanced method
+    console.log(`Fetching today's price for ${ticker} via _fetchSingleProperty`);
+    return this._fetchSingleProperty(ticker, 'regularMarketPrice');
+  }
+
+  /**
+   * Private method to fetch and permanently cache a single historical day's closing price
+   */
+  _fetchSingleHistoricalDay(ticker, date) {
+    const historicalCacheKey = `hist_day_${ticker}_${date.getTime()}`;
+    const cachedPrice = this.cache.get(historicalCacheKey);
+
+    if (cachedPrice) {
+      console.log(`Permanent historical cache hit for ${ticker} on ${date.toDateString()}: ${cachedPrice}`);
+      return JSON.parse(cachedPrice);
+    }
+
+    // Handle weekends by looking back to previous trading day
+    if (isWeekend(date)) {
+      const prevDay = new Date(date);
+      const daysToSubtract = isSunday(date) ? 2 : 1;
+      prevDay.setDate(date.getDate() - daysToSubtract);
+      console.log(`${date.toDateString()} is a weekend, trying ${prevDay.toDateString()} instead.`);
+      return this._fetchSingleHistoricalDay(ticker, prevDay);
+    }
+
+    // Fetch from API
+    const endDate = new Date(date.getTime() + 24 * 60 * 60 * 1000);
+    const startTs = Math.floor(date.getTime() / 1000);
+    const endTs = Math.floor(endDate.getTime() / 1000);
+
+    let url = `https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?period1=${startTs}&period2=${endTs}&interval=1d`;
+    url += "&cacheBust=" + new Date().getTime();
+    console.log(`Fetching single historical day ${ticker} for ${date.toDateString()}: ${url}`);
+
+    try {
+      const res = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+      const data = JSON.parse(res.getContentText());
+
+      if (!data.chart?.result?.[0]?.timestamp) {
+        console.log(`No data available for ${ticker} on ${date.toDateString()}`);
+        return "No data";
+      }
+
+      const timestamps = data.chart.result[0].timestamp;
+      const closes = data.chart.result[0].indicators.quote[0].close;
+
+      if (!closes || closes.length === 0 || closes[0] == null) {
+        console.log(`No close price available for ${ticker} on ${date.toDateString()}`);
+        return "No data";
+      }
+
+      const closePrice = roundValue(closes[0]);
+
+      // Cache permanently (1 year TTL) since historical data never changes
+      this.cache.put(historicalCacheKey, JSON.stringify(closePrice), 365 * 24 * 60 * 60);
+      console.log(`Permanently cached historical price for ${ticker} on ${date.toDateString()}: ${closePrice}`);
+
+      return closePrice;
+
+    } catch (err) {
+      console.error(`Error fetching historical data for ${ticker} on ${date.toDateString()}:`, err);
+      return "Error fetching data";
+    }
+  }
+
+  /**
+   * Private method to fetch historical close prices with intelligent caching
+   */
+  _fetchHistoricalRange(ticker, start, end, isSingleDayRequest) {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    // For single day requests, use the dedicated single day function
+    if (isSingleDayRequest) {
+      return this._fetchSingleHistoricalDay(ticker, start);
+    }
+
+    // For ranges, check if we can build from individual cached days
+    const rangeContainsToday = end.getTime() >= today.getTime();
+    const startTs = Math.floor(start.getTime() / 1000);
+    const endTs = Math.floor(end.getTime() / 1000);
+
+    // If range doesn't contain today, try to use cached range data first
+    const cacheKey = `hist_range_${ticker}_${start.getTime()}_${end.getTime()}`;
+
+    if (!rangeContainsToday) {
+      const cachedRange = this.cache.get(cacheKey);
+      if (cachedRange) {
+        console.log(`Permanent range cache hit for ${ticker} ${start.toDateString()} to ${end.toDateString()}`);
+        return JSON.parse(cachedRange);
+      }
+    }
+
+    // Try to build range from individual cached days
+    const output = [["Date", "Close"]];
+    let needsApiFetch = false;
+    const currentDate = new Date(start);
+    const dayResults = [];
+
+    while (currentDate.getTime() < end.getTime()) {
+      if (isWeekend(currentDate)) {
+        currentDate.setDate(currentDate.getDate() + 1);
+        continue;
+      }
+
+      // For completed trading days, check individual cache
+      if (currentDate.getTime() < today.getTime()) {
+        const dayKey = `hist_day_${ticker}_${currentDate.getTime()}`;
+        const cachedDay = this.cache.get(dayKey);
+
+        if (cachedDay) {
+          const price = JSON.parse(cachedDay);
+          if (price !== "No data" && price !== "Error fetching data") {
+            dayResults.push([new Date(currentDate), price]);
+          }
+        } else {
+          needsApiFetch = true;
+          break; // Need to fetch missing days via API
+        }
+      } else {
+        needsApiFetch = true; // Today or future dates need fresh fetch
+        break;
+      }
+
+      currentDate.setDate(currentDate.getDate() + 1);
+    }
+
+    // If we have all historical days cached and no today data needed, return cached result
+    if (!needsApiFetch && dayResults.length > 0) {
+      dayResults.forEach(dayResult => output.push(dayResult));
+      console.log(`Built range from individual cached days for ${ticker}: ${dayResults.length} days`);
+
+      // Cache the complete range permanently if it's all historical
+      if (!rangeContainsToday) {
+        this.cache.put(cacheKey, JSON.stringify(output), 365 * 24 * 60 * 60); // 1 year
+      }
+      return output;
+    }
+
+    // Need to fetch from API
+    let url = `https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?period1=${startTs}&period2=${endTs}&interval=1d`;
+    url += "&cacheBust=" + new Date().getTime();
+    console.log(`Fetching historical range ${ticker} from ${start.toDateString()} to ${end.toDateString()}: ${url}`);
+
+    try {
+      const res = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+      const data = JSON.parse(res.getContentText());
+
+      if (!data.chart?.result?.[0]?.timestamp) {
+        return "No data";
+      }
+
+      const timestamps = data.chart.result[0].timestamp;
+      const closes = data.chart.result[0].indicators.quote[0].close;
+
+      // Build output and cache individual historical days permanently
+      for (let i = 0; i < timestamps.length; i++) {
+        if (closes[i] != null) {
+          const dateObj = new Date(timestamps[i] * 1000);
+          const price = roundValue(closes[i]);
+          output.push([dateObj, price]);
+
+          // Cache individual historical days permanently (not today)
+          dateObj.setHours(0, 0, 0, 0);
+          if (dateObj.getTime() < today.getTime()) {
+            const dayKey = `hist_day_${ticker}_${dateObj.getTime()}`;
+            this.cache.put(dayKey, JSON.stringify(price), 365 * 24 * 60 * 60); // 1 year
+          }
+        }
+      }
+
+      // Cache the range appropriately
+      if (output.length > 1) {
+        const cacheTtl = rangeContainsToday ? (60 * 60 * 2) : (365 * 24 * 60 * 60); // 2 hours vs 1 year
+        this.cache.put(cacheKey, JSON.stringify(output), cacheTtl);
+        console.log(`Cached range data for ${ticker}: ${output.length - 1} days, TTL: ${rangeContainsToday ? '2 hours' : '1 year'}`);
+      }
+
+      return output;
+
+    } catch (err) {
+      console.error(`Error fetching historical range for ${ticker}:`, err);
+      return "Error fetching data";
+    }
+  }
+}
+
+// Global instance - single cache instance shared across all calls
+const yahooAPI = new YahooFinanceAPI();
+
+/**
  * Example: https://query1.finance.yahoo.com/v8/finance/chart/IWDA.AS
  */
 function yahooF(ticker, property) {
-  // ticker = "IWDA.AS";
-  // property = "longName";
-
-  if (!ticker || !property) {
-    console.error(`invalid ticker${ticker} or property ${property}`);
-    return null;
-  }
-  // Handle range input (ARRAYFORMULA)
-  if (Array.isArray(ticker)) {
-    const results = [];
-    for (let i = 0; i < ticker.length; i++) {
-      const t = ticker[i][0];
-      if (!t) {
-        results.push([""]);
-        continue;
-      }
-      const val = yahooF_single_cached(t, property);
-      results.push([val]);
-    }
-    return results;
-  }
-
-  // Single ticker case
-  return yahooF_single_cached(ticker, property);
+  return yahooAPI.getProperty(ticker, property);
 }
 
-function yahooF_single_cached(ticker, property) {
-  const cache = new SafeCache(CacheService.getScriptCache(), {
-    version: "10", // Increment version to invalidate old caches
-    perUser: true,
-    enable: true,
-  });
-  const cacheKey = `yahooF_${ticker}_${property}`;
-  // cache.remove(cacheKey);
-  let cached = cache.get(cacheKey);
-  cached = roundValue(cached);
-
-  // ? Return cached value if available
-  if (cached) {
-    console.log(`return cached: ${cached}. type: ${typeof(cached)}`);
-    return cached;
-  }
-
-  let url = `https://query1.finance.yahoo.com/v8/finance/chart/${ticker}`;
-  url += "?cacheBust=" + new Date().getTime(); // <-- FIX: Cache Busting
-  console.log(url);
-  try {
-    const res = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
-    const data = JSON.parse(res.getContentText());
-
-    if (!data.chart?.result?.[0]) return null;
-
-    const meta = data.chart.result[0].meta;
-    let value = null;
-
-    if (property === "changePct") {
-      const price = meta.regularMarketPrice;
-      const prev = meta.previousClose;
-      if (prev) value = ((price - prev) / prev) * 100;
-    } else {
-      value = meta[property] ?? null;
-    }
-    value = roundValue(value);
-    cache.put(cacheKey, value, 60); // 1 minutes
-
-    console.log(`return: ${value}. type: ${typeof(value)}`);
-    return value;
-  } catch (err) {
-    console.error(err);
-    return null;
-  }
-}
 
 
 
@@ -140,7 +558,7 @@ function yahooF_single_cached(ticker, property) {
 function sheetDateToJS(dateValue) {
   if (!dateValue) return null;
   if (dateValue instanceof Date) return dateValue;
-    // Sheets counts days from 1899-12-30, JS from 1970-01-01
+  // Sheets counts days from 1899-12-30, JS from 1970-01-01
   return new Date((dateValue - 25569) * 24 * 60 * 60 * 1000);
 }
 
@@ -162,168 +580,11 @@ function isSunday(date) {
 
 
 function yahooHistory(ticker, startDateParam, endDateParam) {
-  // 1. --- SETUP & VALIDATION ---
-  
-  // console.log("test:");
-  // ticker = "IWDA.AS";
-  // // ticker = "TLV.RO";
-  // let todayTest = new Date();
-  // todayTest.setHours(0,0,0,0);
-  // startDateParam = new Date();
-  // startDateParam.setHours(0,0,0,0);
-  
-  // // test: today test
-  // // startDateParam.setDate(todayTest.getDate());
-  
-  // // test: another day in the past 
-  // // startDateParam.setDate(todayTest.getDate()-30);
-  
-  // // test: range last 10 days
-  // startDateParam.setDate(todayTest.getDate()-5);
-  // endDateParam = new Date();
-  // endDateParam.setHours(0,0,0,0);
-  // endDateParam.setDate(todayTest.getDate());
-  
-  
-  if (isNullOrEmpty(ticker)) {
-    console.error("ticker required");
-    return "Ticker required";
-  }
-
-  // Instantiate the cache. Remove clearAll() for production use.
-  const cache = new SafeCache(CacheService.getScriptCache(), {
-    version: "10", // Increment version to invalidate old caches
-    perUser: true,
-    enable: true,
-  });
-  // cache.clearAll(); // Only use for debugging, then comment out
-
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-
-  let start = startDateParam ? sheetDateToJS(startDateParam) : null;
-  let end = endDateParam ? sheetDateToJS(endDateParam) : null;
-
-  // 2. --- DETERMINE FETCH TYPE (TODAY, SINGLE DAY, OR RANGE) ---
-
-  // Case 1: Fetching for today's current price
-  if (start && !end && start.getTime() === today.getTime()) {
-    return fetchTodaysPrice(ticker, cache);
-  }
-
-  // Case 2: Fetching for a historical range or single day
-  // Default to last 30 days if no start date is provided
-  if (!start) {
-    start = new Date(today.getTime() - 30 * 24 * 60 * 60 * 1000);
-    end = today;
-  }
-  // If only start date is provided, set end date to be one day after for the query
-  if (start && !end) {
-    end = new Date(start.getTime() + 24 * 60 * 60 * 1000);
-  }
-
-  return fetchHistoricalData(ticker, start, end, cache, !endDateParam && !!startDateParam);
+  return yahooAPI.getHistory(ticker, startDateParam, endDateParam);
 }
 
-/**
- * Fetches the current market price for a given ticker.
- */
-function fetchTodaysPrice(ticker, cache) {
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  const cacheKey = `price_${ticker}_today_${today.getTime()}`;
-  const cached = cache.get(cacheKey);
-  if (cached) {
-    console.log(`Cache hit (today): ${cacheKey}`);
-    return JSON.parse(cached);
-  }
 
-  let url = `https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?interval=1m&range=1d`;
-  url += "&cacheBust=" + new Date().getTime(); // <-- FIX: Cache Busting
-  console.log("Fetching today's price from URL: " + url);
 
-  try {
-    const res = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
-    const data = JSON.parse(res.getContentText());
-    const meta = data.chart.result[0].meta;
-    const currentPrice = roundValue(meta.regularMarketPrice);
-
-    cache.put(cacheKey, JSON.stringify(currentPrice), 60); // cache 1 minute
-    console.log(`Fetched and cached today's price: ${currentPrice}`);
-    return currentPrice;
-  } catch (err) {
-    console.error("Error fetching today's price:", err);
-    return "Error fetching price";
-  }
-}
-
-/**
- * Fetches historical close prices for a ticker between two dates.
- */
-function fetchHistoricalData(ticker, start, end, cache, isSingleDayRequest) {
-  const startTs = Math.floor(start.getTime() / 1000);
-  const endTs = Math.floor(end.getTime() / 1000);
-
-  const cacheKey = `hist_${ticker}_${start.getTime()}_${end.getTime()}`;
-  // cache.remove(cacheKey);
-  const cached = cache.get(cacheKey);
-  if (cached) {
-    console.log(`Cache hit (historical): ${cacheKey}`);
-    return JSON.parse(cached);
-  }
-
-  let url = `https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?period1=${startTs}&period2=${endTs}&interval=1d`;
-  url += "&cacheBust=" + new Date().getTime(); // <-- FIX: Cache Busting
-  console.log("Fetching historical data from URL: " + url);
-
-  try {
-    const res = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
-    const data = JSON.parse(res.getContentText());
-
-    if (!data.chart?.result?.[0]?.timestamp) {
-      // Handle weekends for single day requests by looking back
-      if (isSingleDayRequest && isWeekend(start)) {
-        const prevDay = new Date(start);
-        const daysToSubtract = isSunday(start) ? 2 : 1;
-        prevDay.setDate(start.getDate() - daysToSubtract);
-        console.log(`${start.toDateString()} is a weekend, trying ${prevDay.toDateString()} instead.`);
-        // Call itself recursively for the previous non-weekend day
-        return fetchHistoricalData(ticker, prevDay, start, cache, true);
-      }
-      return "No data";
-    }
-
-    const timestamps = data.chart.result[0].timestamp;
-    const closes = data.chart.result[0].indicators.quote[0].close;
-
-    // If it was a single day request, return just the value
-    if (isSingleDayRequest) {
-      const output = roundValue(closes[0]);
-      cache.put(cacheKey, JSON.stringify(output), 60 * 60 * 6); // cache 6 hours
-      // cache.put(cacheKey, JSON.stringify(output), 10); // cache 10 seconds
-      console.log(`Fetched and cached singeDay's price: ${output}`);
-      return output;
-    }
-
-    // Otherwise, build the 2D array for a range
-    const output = [["Date", "Close"]];
-    for (let i = 0; i < timestamps.length; i++) {
-      if (closes[i] != null) {
-        output.push([new Date(timestamps[i] * 1000), roundValue(closes[i])]);
-      }
-    }
-    
-    if (output.length > 1) {
-      cache.put(cacheKey, JSON.stringify(output), 60 * 60 * 6); // cache 6 hours
-      // cache.put(cacheKey, JSON.stringify(output),  10); // cache 10 seconds
-    }
-    console.log(`Fetched and cached historical data price: ${output}`);
-    return output;
-
-  } catch (err) {
-    console.error("Error fetching historical data:", err);
-    return "Error fetching data";
-  }
-}
+// All Yahoo Finance functionality is now handled by the YahooFinanceAPI class
 
 

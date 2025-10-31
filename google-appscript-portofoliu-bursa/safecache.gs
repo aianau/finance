@@ -1,5 +1,5 @@
 /**
- * SafeCache — versioned, user-aware, optionally disabled cache wrapper
+ * SafeCache ï¿½ versioned, user-aware, optionally disabled cache wrapper
  * for Google Apps Script.
  *
  * Features:
@@ -22,7 +22,16 @@ class SafeCache {
     this.perUser = options.perUser !== false; // default true
     this.enabled = options.enable !== false;  // default true
 
-    const userKeyPart = this.perUser ? Session.getTemporaryActiveUserKey() + "__" : "";
+    let userKeyPart = "";
+    if (this.perUser) {
+      const fullUserKey = Session.getTemporaryActiveUserKey();
+      // Create a short hash of the user key to avoid cache key length limits (250 chars max)
+      const userHash = Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, fullUserKey)
+        .map(byte => (byte + 256).toString(36).slice(1))
+        .join('')
+        .substring(0, 8); // Use first 8 chars of hash
+      userKeyPart = userHash + "__";
+    }
     this.globalPrefix = `v${this.version}_${userKeyPart}`;
     this.KEY_TRACKER = `${this.globalPrefix}SAFE_CACHE_KEYS__`;
   }
