@@ -206,9 +206,31 @@ class YahooFinanceAPI {
    * @return {*} Historical price data
    */
   getHistory(ticker, startDate, endDate) {
+    // console.log("test:");
+    // ticker = "IWDA.AS";
+    // // ticker = "TLV.RO";
+    // let todayTest = new Date();
+    // todayTest.setHours(0, 0, 0, 0);
+    // startDate = new Date();
+    // startDate.setHours(0, 0, 0, 0);
+
+    // // test: today test
+    // // startDateParam.setDate(todayTest.getDate());
+
+    // // test: another day in the past 
+    // // startDateParam.setDate(todayTest.getDate()-30);
+
+    // // test: range last 10 days
+    // startDate.setDate(todayTest.getDate() - 5);
+    // endDate = new Date();
+    // endDate.setHours(0, 0, 0, 0);
+    // endDate.setDate(todayTest.getDate());
+
+
+
     if (isNullOrEmpty(ticker)) {
       console.error("ticker required");
-      return "Ticker required";
+      return "ERR[getHistory]: Ticker parameter is required (empty or null)";
     }
 
     const today = new Date();
@@ -280,7 +302,10 @@ class YahooFinanceAPI {
       const res = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
       const data = JSON.parse(res.getContentText());
 
-      if (!data.chart?.result?.[0]) return null;
+      if (!data.chart?.result?.[0]) {
+        console.error(`ERR[_fetchSingleProperty]: No chart data returned from API for ticker ${ticker}, property ${property}`);
+        return `ERR[_fetchSingleProperty]: No chart data for ${ticker}.${property} - URL: ${url}`;
+      }
 
       const meta = data.chart.result[0].meta;
 
@@ -330,7 +355,7 @@ class YahooFinanceAPI {
 
     } catch (err) {
       console.error(`Error fetching ${ticker}.${property}:`, err);
-      return null;
+      return `ERR[_fetchSingleProperty]: Exception fetching ${ticker}.${property} - ${err.toString()} - URL: ${url}`;
     }
   }
 
@@ -392,16 +417,18 @@ class YahooFinanceAPI {
       const data = JSON.parse(res.getContentText());
 
       if (!data.chart?.result?.[0]?.timestamp) {
-        console.log(`No data available for ${ticker} on ${date.toDateString()}`);
-        return "No data";
+        const dateStr = date.toDateString();
+        console.error(`ERR[_fetchSingleHistoricalDay]: No timestamp data for ${ticker} on ${dateStr}`);
+        return `ERR[_fetchSingleHistoricalDay]: No timestamp data for ${ticker} on ${dateStr} - URL: ${url}`;
       }
 
       const timestamps = data.chart.result[0].timestamp;
       const closes = data.chart.result[0].indicators.quote[0].close;
 
       if (!closes || closes.length === 0 || closes[0] == null) {
-        console.log(`No close price available for ${ticker} on ${date.toDateString()}`);
-        return "No data";
+        const dateStr = date.toDateString();
+        console.error(`ERR[_fetchSingleHistoricalDay]: No close price available for ${ticker} on ${dateStr}`);
+        return `ERR[_fetchSingleHistoricalDay]: No close price for ${ticker} on ${dateStr} - URL: ${url}`;
       }
 
       const closePrice = roundValue(closes[0]);
@@ -413,14 +440,15 @@ class YahooFinanceAPI {
       return closePrice;
 
     } catch (err) {
-      console.error(`Error fetching historical data for ${ticker} on ${date.toDateString()}:`, err);
-      return "Error fetching data";
+      const dateStr = date.toDateString();
+      console.error(`ERR[_fetchSingleHistoricalDay]: Exception for ${ticker} on ${dateStr}:`, err);
+      return `ERR[_fetchSingleHistoricalDay]: Exception for ${ticker} on ${dateStr} - ${err.toString()} - URL: ${url}`;
     }
   }
 
   /**
    * Private method to fetch historical close prices with intelligent caching
-   * OPTIMIZED for large date ranges (365+ days)
+   * OPTIMIZED with smart intervals and flexible range matching for maximum cache efficiency
    */
   _fetchHistoricalRange(ticker, start, end, isSingleDayRequest) {
     const today = new Date();
@@ -431,127 +459,156 @@ class YahooFinanceAPI {
       return this._fetchSingleHistoricalDay(ticker, start);
     }
 
-    // For ranges, check if we can build from individual cached days
     const rangeContainsToday = end.getTime() >= today.getTime();
     const startTs = Math.floor(start.getTime() / 1000);
     const endTs = Math.floor(end.getTime() / 1000);
 
-    // If range doesn't contain today, try to use cached range data first
-    const cacheKey = `hist_range_${ticker}_${start.getTime()}_${end.getTime()}`;
+    // Calculate interval using valid Yahoo Finance intervals
+    // Valid intervals: [1m, 2m, 5m, 15m, 30m, 60m, 90m, 1h, 4h, 1d, 5d, 1wk, 1mo, 3mo]
+    const totalDays = Math.ceil((end.getTime() - start.getTime()) / (24 * 60 * 60 * 1000));
+    const interval = totalDays > 31 ? "1wk" : "1d";
 
-    if (!rangeContainsToday) {
-      const cachedRange = this.cache.get(cacheKey);
-      if (cachedRange) {
-        console.log(`Permanent range cache hit for ${ticker} ${start.toDateString()} to ${end.toDateString()}`);
-        return JSON.parse(cachedRange);
+    console.log(`Range analysis for ${ticker}: ${totalDays} days → ${interval} interval`);
+
+    // STEP 1: Smart cache lookup with flexible range matching
+    // For large ranges (1wk), check flexible cache even if range contains today
+    // For small ranges (1d), only check if range doesn't contain today (precision matters)
+    const shouldCheckFlexibleCache = interval === "1wk" || !rangeContainsToday;
+
+    if (shouldCheckFlexibleCache) {
+      const cachedData = this._findCachedRangeData(ticker, start, end, interval);
+      if (cachedData) {
+        console.log(`Flexible range cache hit for ${ticker} ${start.toDateString()} to ${end.toDateString()} (${interval})`);
+        return cachedData;
       }
+    } else {
+      console.log(`Skipping flexible cache for ${ticker} - small range containing today requires fresh data`);
     }
 
-    // OPTIMIZATION: Pre-calculate all trading days and batch cache operations
-    const tradingDays = this._getTradingDaysInRange(start, end, today);
-    console.log(`Checking cache for ${tradingDays.length} trading days for ${ticker}`);
+    // STEP 2: For small ranges (1d interval), check individual day cache for precision
+    if (interval === "1d") {
+      console.log(`Small range - checking individual day cache for ${ticker}`);
 
-    if (tradingDays.length > 0) {
-      // OPTIMIZATION: Batch cache lookup instead of individual calls
-      const cacheKeys = tradingDays.map(day => `hist_day_${ticker}_${day.getTime()}`);
-      const cachedData = this.cache.getAll(cacheKeys);
+      // OPTIMIZATION: Pre-calculate all trading days and batch cache operations
+      const tradingDays = this._getTradingDaysInRange(start, end, today);
+      console.log(`Checking cache for ${tradingDays.length} trading days for ${ticker}`);
 
-      let allCached = true;
-      const dayResults = [];
+      if (tradingDays.length > 0) {
+        // OPTIMIZATION: Batch cache lookup instead of individual calls
+        const cacheKeys = tradingDays.map(day => `hist_day_${ticker}_${day.getTime()}`);
+        const cachedData = this.cache.getAll(cacheKeys);
 
-      for (let i = 0; i < tradingDays.length; i++) {
-        const day = tradingDays[i];
-        const cacheKey = cacheKeys[i];
-        const cachedDay = cachedData[cacheKey];
+        let allCached = true;
+        const dayResults = [];
 
-        if (cachedDay) {
-          const price = JSON.parse(cachedDay);
-          if (price !== "No data" && price !== "Error fetching data") {
-            dayResults.push([new Date(day), price]);
+        for (let i = 0; i < tradingDays.length; i++) {
+          const day = tradingDays[i];
+          const dayKey = cacheKeys[i];
+          const cachedDay = cachedData[dayKey];
+
+          if (cachedDay) {
+            const price = JSON.parse(cachedDay);
+            // Skip error messages (they start with "ERR[")
+            if (typeof price === 'string' && price.startsWith("ERR[")) {
+              // Skip error messages
+            } else {
+              // Include valid data (numbers, valid strings, etc.)
+              dayResults.push([new Date(day), price]);
+            }
+          } else if (day.getTime() < today.getTime()) {
+            // Missing historical data - need API fetch
+            allCached = false;
+            break;
+          } else {
+            // Today or future dates need fresh fetch
+            allCached = false;
+            break;
           }
-        } else if (day.getTime() < today.getTime()) {
-          // Missing historical data - need API fetch
-          allCached = false;
-          break;
-        } else {
-          // Today or future dates need fresh fetch
-          allCached = false;
-          break;
+        }
+
+        // If we have all historical days cached and no today data needed, return cached result
+        if (allCached && dayResults.length > 0) {
+          const output = [["Date", "Close"]];
+          dayResults.forEach(dayResult => output.push(dayResult));
+          console.log(`Built range from batch cached days for ${ticker}: ${dayResults.length} days`);
+
+          // Cache the complete range permanently if it's all historical
+          const cacheKey = `hist_range_${ticker}_${start.getTime()}_${end.getTime()}`;
+          if (!rangeContainsToday) {
+            this.cache.put(cacheKey, JSON.stringify(output), 365 * 24 * 60 * 60); // 1 year
+          }
+          return output;
         }
       }
-
-      // If we have all historical days cached and no today data needed, return cached result
-      if (allCached && dayResults.length > 0) {
-        const output = [["Date", "Close"]];
-        dayResults.forEach(dayResult => output.push(dayResult));
-        console.log(`Built range from batch cached days for ${ticker}: ${dayResults.length} days`);
-
-        // Cache the complete range permanently if it's all historical
-        if (!rangeContainsToday) {
-          this.cache.put(cacheKey, JSON.stringify(output), 365 * 24 * 60 * 60); // 1 year
-        }
-        return output;
-      }
+    } else {
+      console.log(`Large range for ${ticker} - using ${interval} interval for efficiency`);
     }
 
-    // Need to fetch from API
-    let url = `https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?period1=${startTs}&period2=${endTs}&interval=1d`;
+    // STEP 3: Fetch from API using smart interval
+    let url = `https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?period1=${startTs}&period2=${endTs}&interval=${interval}`;
     url += "&cacheBust=" + new Date().getTime();
-    console.log(`Fetching historical range ${ticker} from ${start.toDateString()} to ${end.toDateString()}: ${url}`);
+    console.log(`API fetch for ${ticker}: ${start.toDateString()} to ${end.toDateString()} using ${interval} (${totalDays} days)`);
 
     try {
       const res = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
       const data = JSON.parse(res.getContentText());
 
       if (!data.chart?.result?.[0]?.timestamp) {
-        return "No data";
+        const startStr = start.toDateString();
+        const endStr = end.toDateString();
+        console.error(`ERR[_fetchHistoricalRange]: No timestamp data for ${ticker} from ${startStr} to ${endStr} (interval: ${interval})`);
+        return `ERR[_fetchHistoricalRange]: No timestamp data for ${ticker} from ${startStr} to ${endStr} - URL: ${url}`;
       }
 
       const timestamps = data.chart.result[0].timestamp;
       const closes = data.chart.result[0].indicators.quote[0].close;
       const output = [["Date", "Close"]];
 
-      // OPTIMIZATION: Batch individual day caching
-      const daysToCacheBatch = {};
-
-      // Build output and prepare batch cache data
+      // Build output from API data
       for (let i = 0; i < timestamps.length; i++) {
         if (closes[i] != null) {
           const dateObj = new Date(timestamps[i] * 1000);
           const price = roundValue(closes[i]);
           output.push([dateObj, price]);
-
-          // Prepare individual historical days for batch caching (not today)
-          dateObj.setHours(0, 0, 0, 0);
-          if (dateObj.getTime() < today.getTime()) {
-            const dayKey = `hist_day_${ticker}_${dateObj.getTime()}`;
-            daysToCacheBatch[dayKey] = JSON.stringify(price);
-          }
         }
       }
 
-      // OPTIMIZATION: Batch cache individual days
-      if (Object.keys(daysToCacheBatch).length > 0) {
-        // Unfortunately, Google Apps Script cache doesn't have putAll, so we still need individual puts
-        // But we can at least batch the preparation
-        Object.entries(daysToCacheBatch).forEach(([key, value]) => {
-          this.cache.put(key, value, 365 * 24 * 60 * 60); // 1 year
-        });
-        console.log(`Batch cached ${Object.keys(daysToCacheBatch).length} individual days for ${ticker}`);
+      // STEP 4: Cache individual days ONLY for 1d intervals (maintains granular cache)
+      if (interval === "1d") {
+        console.log(`Caching individual days for ${ticker} (1d interval)`);
+
+        for (let i = 0; i < timestamps.length; i++) {
+          if (closes[i] != null) {
+            const dateObj = new Date(timestamps[i] * 1000);
+            const price = roundValue(closes[i]);
+
+            // Cache individual historical days permanently (not today)
+            dateObj.setHours(0, 0, 0, 0);
+            if (dateObj.getTime() < today.getTime()) {
+              const dayKey = `hist_day_${ticker}_${dateObj.getTime()}`;
+              this.cache.put(dayKey, JSON.stringify(price), 365 * 24 * 60 * 60); // 1 year
+            }
+          }
+        }
+      } else {
+        console.log(`Skipping individual day caching for ${ticker} (${interval} interval - range caching only)`);
       }
 
-      // Cache the range appropriately
+      // STEP 5: Cache the range data (no interval in key - it's deterministically calculated)
       if (output.length > 1) {
+        const cacheKey = `hist_range_${ticker}_${start.getTime()}_${end.getTime()}`;
         const cacheTtl = rangeContainsToday ? (60 * 60 * 2) : (365 * 24 * 60 * 60); // 2 hours vs 1 year
         this.cache.put(cacheKey, JSON.stringify(output), cacheTtl);
-        console.log(`Cached range data for ${ticker}: ${output.length - 1} days, TTL: ${rangeContainsToday ? '2 hours' : '1 year'}`);
+        console.log(`Cached range for ${ticker}: ${output.length - 1} points (${interval}), TTL: ${rangeContainsToday ? '2h' : '1yr'}`);
       }
 
       return output;
 
     } catch (err) {
-      console.error(`Error fetching historical range for ${ticker}:`, err);
-      return "Error fetching data";
+      const startStr = start.toDateString();
+      const endStr = end.toDateString();
+      console.error(`ERR[_fetchHistoricalRange]: Exception for ${ticker} from ${startStr} to ${endStr}:`, err);
+      return `ERR[_fetchHistoricalRange]: Exception for ${ticker} from ${startStr} to ${endStr} - ${err.toString()} - URL: ${url}`;
     }
   }
 
@@ -571,6 +628,49 @@ class YahooFinanceAPI {
     }
 
     return tradingDays;
+  }
+
+  /**
+   * OPTIMIZATION HELPER: Find cached range data with flexible matching for large intervals
+   * For large ranges, we don't need exact date accuracy, so we check nearby date ranges
+   */
+  _findCachedRangeData(ticker, start, end, interval) {
+    // For small ranges (1d interval), only check exact match
+    if (interval === "1d") {
+      const exactKey = `hist_range_${ticker}_${start.getTime()}_${end.getTime()}`;
+      const cached = this.cache.get(exactKey);
+      if (cached) {
+        console.log(`Exact range cache hit for ${ticker}`);
+        return JSON.parse(cached);
+      }
+      return null;
+    }
+
+    // For large ranges (1wk interval), check flexible nearby ranges
+    // We check -1, -2, -3, -4, -5, -6 days shifts since date accuracy isn't critical for large ranges
+    const maxShiftDays = 6;
+    const msPerDay = 24 * 60 * 60 * 1000;
+
+    console.log(`Checking flexible range cache for ${ticker} (-${maxShiftDays} days)`);
+
+    for (let shiftDays = 0; shiftDays <= maxShiftDays; shiftDays++) {
+      const shifts = shiftDays === 0 ? [0] : [-shiftDays, 0]; // Check only in past
+
+      for (const shift of shifts) {
+        const shiftedStart = new Date(start.getTime() + (shift * msPerDay));
+        const shiftedEnd = new Date(end.getTime() + (shift * msPerDay));
+        const shiftedKey = `hist_range_${ticker}_${shiftedStart.getTime()}_${shiftedEnd.getTime()}`;
+
+        const cached = this.cache.get(shiftedKey);
+        if (cached) {
+          console.log(`Flexible range cache hit for ${ticker} (shifted ${shift} days)`);
+          return JSON.parse(cached);
+        }
+      }
+    }
+
+    console.log(`No flexible cache match found for ${ticker}`);
+    return null;
   }
 }
 
