@@ -419,6 +419,7 @@ class YahooFinanceAPI {
 
   /**
    * Private method to fetch historical close prices with intelligent caching
+   * OPTIMIZED for large date ranges (365+ days)
    */
   _fetchHistoricalRange(ticker, start, end, isSingleDayRequest) {
     const today = new Date();
@@ -445,50 +446,51 @@ class YahooFinanceAPI {
       }
     }
 
-    // Try to build range from individual cached days
-    const output = [["Date", "Close"]];
-    let needsApiFetch = false;
-    const currentDate = new Date(start);
-    const dayResults = [];
+    // OPTIMIZATION: Pre-calculate all trading days and batch cache operations
+    const tradingDays = this._getTradingDaysInRange(start, end, today);
+    console.log(`Checking cache for ${tradingDays.length} trading days for ${ticker}`);
 
-    while (currentDate.getTime() < end.getTime()) {
-      if (isWeekend(currentDate)) {
-        currentDate.setDate(currentDate.getDate() + 1);
-        continue;
-      }
+    if (tradingDays.length > 0) {
+      // OPTIMIZATION: Batch cache lookup instead of individual calls
+      const cacheKeys = tradingDays.map(day => `hist_day_${ticker}_${day.getTime()}`);
+      const cachedData = this.cache.getAll(cacheKeys);
 
-      // For completed trading days, check individual cache
-      if (currentDate.getTime() < today.getTime()) {
-        const dayKey = `hist_day_${ticker}_${currentDate.getTime()}`;
-        const cachedDay = this.cache.get(dayKey);
+      let allCached = true;
+      const dayResults = [];
+
+      for (let i = 0; i < tradingDays.length; i++) {
+        const day = tradingDays[i];
+        const cacheKey = cacheKeys[i];
+        const cachedDay = cachedData[cacheKey];
 
         if (cachedDay) {
           const price = JSON.parse(cachedDay);
           if (price !== "No data" && price !== "Error fetching data") {
-            dayResults.push([new Date(currentDate), price]);
+            dayResults.push([new Date(day), price]);
           }
+        } else if (day.getTime() < today.getTime()) {
+          // Missing historical data - need API fetch
+          allCached = false;
+          break;
         } else {
-          needsApiFetch = true;
-          break; // Need to fetch missing days via API
+          // Today or future dates need fresh fetch
+          allCached = false;
+          break;
         }
-      } else {
-        needsApiFetch = true; // Today or future dates need fresh fetch
-        break;
       }
 
-      currentDate.setDate(currentDate.getDate() + 1);
-    }
+      // If we have all historical days cached and no today data needed, return cached result
+      if (allCached && dayResults.length > 0) {
+        const output = [["Date", "Close"]];
+        dayResults.forEach(dayResult => output.push(dayResult));
+        console.log(`Built range from batch cached days for ${ticker}: ${dayResults.length} days`);
 
-    // If we have all historical days cached and no today data needed, return cached result
-    if (!needsApiFetch && dayResults.length > 0) {
-      dayResults.forEach(dayResult => output.push(dayResult));
-      console.log(`Built range from individual cached days for ${ticker}: ${dayResults.length} days`);
-
-      // Cache the complete range permanently if it's all historical
-      if (!rangeContainsToday) {
-        this.cache.put(cacheKey, JSON.stringify(output), 365 * 24 * 60 * 60); // 1 year
+        // Cache the complete range permanently if it's all historical
+        if (!rangeContainsToday) {
+          this.cache.put(cacheKey, JSON.stringify(output), 365 * 24 * 60 * 60); // 1 year
+        }
+        return output;
       }
-      return output;
     }
 
     // Need to fetch from API
@@ -506,21 +508,35 @@ class YahooFinanceAPI {
 
       const timestamps = data.chart.result[0].timestamp;
       const closes = data.chart.result[0].indicators.quote[0].close;
+      const output = [["Date", "Close"]];
 
-      // Build output and cache individual historical days permanently
+      // OPTIMIZATION: Batch individual day caching
+      const daysToCacheBatch = {};
+
+      // Build output and prepare batch cache data
       for (let i = 0; i < timestamps.length; i++) {
         if (closes[i] != null) {
           const dateObj = new Date(timestamps[i] * 1000);
           const price = roundValue(closes[i]);
           output.push([dateObj, price]);
 
-          // Cache individual historical days permanently (not today)
+          // Prepare individual historical days for batch caching (not today)
           dateObj.setHours(0, 0, 0, 0);
           if (dateObj.getTime() < today.getTime()) {
             const dayKey = `hist_day_${ticker}_${dateObj.getTime()}`;
-            this.cache.put(dayKey, JSON.stringify(price), 365 * 24 * 60 * 60); // 1 year
+            daysToCacheBatch[dayKey] = JSON.stringify(price);
           }
         }
+      }
+
+      // OPTIMIZATION: Batch cache individual days
+      if (Object.keys(daysToCacheBatch).length > 0) {
+        // Unfortunately, Google Apps Script cache doesn't have putAll, so we still need individual puts
+        // But we can at least batch the preparation
+        Object.entries(daysToCacheBatch).forEach(([key, value]) => {
+          this.cache.put(key, value, 365 * 24 * 60 * 60); // 1 year
+        });
+        console.log(`Batch cached ${Object.keys(daysToCacheBatch).length} individual days for ${ticker}`);
       }
 
       // Cache the range appropriately
@@ -536,6 +552,24 @@ class YahooFinanceAPI {
       console.error(`Error fetching historical range for ${ticker}:`, err);
       return "Error fetching data";
     }
+  }
+
+  /**
+   * OPTIMIZATION HELPER: Pre-calculate all trading days in a range
+   * This avoids repetitive weekend checks and date calculations
+   */
+  _getTradingDaysInRange(start, end, today) {
+    const tradingDays = [];
+    const currentDate = new Date(start);
+
+    while (currentDate.getTime() < end.getTime()) {
+      if (!isWeekend(currentDate)) {
+        tradingDays.push(new Date(currentDate));
+      }
+      currentDate.setDate(currentDate.getDate() + 1);
+    }
+
+    return tradingDays;
   }
 }
 
