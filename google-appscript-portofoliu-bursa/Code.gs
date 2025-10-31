@@ -84,14 +84,15 @@ class SafeCache {
   put(key, value, ttlSeconds = 21600) {
     if (!this.enabled) return; // skip if disabled
     const fullKey = this.globalPrefix + key;
+    // ttlSeconds = 30; // DECOMMENT if wat to debug
     this.cache.put(fullKey, value, ttlSeconds);
-    this._trackKey(fullKey, ttlSeconds);
+    // this._trackKey(fullKey, ttlSeconds);
   }
 
   /** Retrieve a value */
   get(key) {
     if (!this.enabled) return null;
-    console.log(this.globalPrefix + key);
+    // console.log(this.globalPrefix + key);
     return this.cache.get(this.globalPrefix + key);
   }
 
@@ -108,38 +109,38 @@ class SafeCache {
     if (!Array.isArray(keys)) keys = [keys];
     const fullKeys = keys.map(k => this.globalPrefix + k);
     this.cache.removeAll(fullKeys);
-    this._untrackKeys(fullKeys);
+    // this._untrackKeys(fullKeys);
   }
 
   /** Remove all tracked keys for this version/user */
-  clearAll() {
-    if (!this.enabled) return;
-    const tracked = this._getTrackedKeys();
-    if (tracked.length > 0) {
-      this.cache.removeAll(tracked);
-    }
-    this.cache.remove(this.KEY_TRACKER);
-  }
+  // clearAll() {
+  //   if (!this.enabled) return;
+  //   const tracked = this._getTrackedKeys();
+  //   if (tracked.length > 0) {
+  //     this.cache.removeAll(tracked);
+  //   }
+  //   this.cache.remove(this.KEY_TRACKER);
+  // }
 
   /** Private: track new keys */
-  _trackKey(key, ttlSeconds) {
-    const tracked = this._getTrackedKeys();
-    if (!tracked.includes(key)) tracked.push(key);
-    this.cache.put(this.KEY_TRACKER, JSON.stringify(tracked), ttlSeconds);
-  }
+  // _trackKey(key, ttlSeconds) {
+  //   const tracked = this._getTrackedKeys();
+  //   if (!tracked.includes(key)) tracked.push(key);
+  //   this.cache.put(this.KEY_TRACKER, JSON.stringify(tracked), ttlSeconds);
+  // }
 
   /** Private: untrack removed keys */
-  _untrackKeys(keys) {
-    let tracked = this._getTrackedKeys();
-    tracked = tracked.filter(k => !keys.includes(k));
-    this.cache.put(this.KEY_TRACKER, JSON.stringify(tracked), 21600);
-  }
+  // _untrackKeys(keys) {
+  //   let tracked = this._getTrackedKeys();
+  //   tracked = tracked.filter(k => !keys.includes(k));
+  //   this.cache.put(this.KEY_TRACKER, JSON.stringify(tracked), 21600);
+  // }
 
   /** Private: get tracked keys */
-  _getTrackedKeys() {
-    const json = this.cache.get(this.KEY_TRACKER);
-    return json ? JSON.parse(json) : [];
-  }
+  // _getTrackedKeys() {
+  //   const json = this.cache.get(this.KEY_TRACKER);
+  //   return json ? JSON.parse(json) : [];
+  // }
 }
 
 /**
@@ -149,7 +150,7 @@ class SafeCache {
 class YahooFinanceAPI {
   constructor(options = {}) {
     this.cache = new SafeCache(CacheService.getScriptCache(), {
-      version: "11", // Enhanced caching version
+      version: "12", // Enhanced caching version
       perUser: true,
       enable: true,
       ...options
