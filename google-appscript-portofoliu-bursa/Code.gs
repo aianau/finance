@@ -529,7 +529,7 @@ class YahooFinanceAPI {
 
         // If we have all historical days cached and no today data needed, return cached result
         if (allCached && dayResults.length > 0) {
-          const output = [["Date", "Close"]];
+          const output = [["Close"]];
           dayResults.forEach(dayResult => output.push(dayResult));
           console.log(`Built range from batch cached days for ${ticker}: ${dayResults.length} days`);
 
@@ -563,14 +563,14 @@ class YahooFinanceAPI {
 
       const timestamps = data.chart.result[0].timestamp;
       const closes = data.chart.result[0].indicators.quote[0].close;
-      const output = [["Date", "Close"]];
+      const output = [["Close"]];
 
       // Build output from API data
       for (let i = 0; i < timestamps.length; i++) {
         if (closes[i] != null) {
-          const dateObj = new Date(timestamps[i] * 1000);
+          // const dateObj = new Date(timestamps[i] * 1000);
           const price = roundValue(closes[i]);
-          output.push([dateObj, price]);
+          output.push([price]);
         }
       }
 
