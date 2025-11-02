@@ -150,7 +150,7 @@ class SafeCache {
 class YahooFinanceAPI {
   constructor(options = {}) {
     this.cache = new SafeCache(CacheService.getScriptCache(), {
-      version: "12", // Enhanced caching version
+      version: "13", // Enhanced caching version
       perUser: true,
       enable: true,
       ...options
@@ -513,7 +513,8 @@ class YahooFinanceAPI {
               // Skip error messages
             } else {
               // Include valid data (numbers, valid strings, etc.)
-              dayResults.push([new Date(day), price]);
+              // dayResults.push([new Date(day), price]);
+              dayResults.push([price]);
             }
           } else if (day.getTime() < today.getTime()) {
             // Missing historical data - need API fetch
@@ -715,6 +716,53 @@ function isSunday(date) {
 
 
 function yahooHistory(ticker, startDateParam, endDateParam) {
+  // Handle array input (ARRAYFORMULA)
+  if (Array.isArray(ticker)) {
+    const results = [];
+    for (let i = 0; i < ticker.length; i++) {
+      const t = ticker[i][0];
+      if (!t) {
+        results.push([""]);
+        continue;
+      }
+      
+      // Extract startDate and endDate from array if provided
+      let startDate = null;
+      let endDate = null;
+      if (Array.isArray(startDateParam) && startDateParam[i] && startDateParam[i][0] !== undefined && startDateParam[i][0] !== "") {
+        startDate = startDateParam[i][0];
+      } else if (!Array.isArray(startDateParam) && startDateParam !== undefined && startDateParam !== "") {
+        startDate = startDateParam;
+      }
+      
+      if (Array.isArray(endDateParam) && endDateParam[i] && endDateParam[i][0] !== undefined && endDateParam[i][0] !== "") {
+        endDate = endDateParam[i][0];
+      } else if (!Array.isArray(endDateParam) && endDateParam !== undefined && endDateParam !== "") {
+        endDate = endDateParam;
+      }
+      
+      const val = yahooAPI.getHistory(t, startDate, endDate);
+      
+      // Handle different return types from getHistory
+      // If it returns an array (historical range), extract the last price value
+      if (Array.isArray(val)) {
+        // Array format: [["Date", "Close"], [date1, price1], ...]
+        // Return the last price value (most recent)
+        if (val.length > 1) {
+          const lastPrice = val[val.length - 1][1];
+          results.push([lastPrice]);
+        } else {
+          results.push([""]);
+        }
+      } else {
+        // Single value (number or error string)
+        results.push([val]);
+      }
+    }
+    return results;
+  }
+  
+  // Single ticker case
   return yahooAPI.getHistory(ticker, startDateParam, endDateParam);
 }
 
