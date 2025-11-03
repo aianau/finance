@@ -459,14 +459,24 @@ class YahooFinanceAPI {
       return this._fetchSingleHistoricalDay(ticker, start);
     }
 
-    const rangeContainsToday = end.getTime() >= today.getTime();
-    const startTs = Math.floor(start.getTime() / 1000);
-    const endTs = Math.floor(end.getTime() / 1000);
-
     // Calculate interval using valid Yahoo Finance intervals
     // Valid intervals: [1m, 2m, 5m, 15m, 30m, 60m, 90m, 1h, 4h, 1d, 5d, 1wk, 1mo, 3mo]
     const totalDays = Math.ceil((end.getTime() - start.getTime()) / (24 * 60 * 60 * 1000));
     const interval = totalDays > 31 ? "1wk" : "1d";
+
+    // OPTIMIZATION: For weekly intervals, align start date to the first Tuesday before or on start date
+    // This ensures consistent data points from Yahoo Finance API and maximizes cache hits
+    if (interval === "1wk") {
+      const originalStart = new Date(start);
+      start = this._getFirstTuesdayBeforeOrOn(start);
+      if (start.getTime() !== originalStart.getTime()) {
+        console.log(`Aligned start date to first Tuesday: ${originalStart.toDateString()} → ${start.toDateString()}`);
+      }
+    }
+
+    const rangeContainsToday = end.getTime() >= today.getTime();
+    const startTs = Math.floor(start.getTime() / 1000);
+    const endTs = Math.floor(end.getTime() / 1000);
 
     console.log(`Range analysis for ${ticker}: ${totalDays} days → ${interval} interval`);
 
@@ -611,6 +621,34 @@ class YahooFinanceAPI {
       console.error(`ERR[_fetchHistoricalRange]: Exception for ${ticker} from ${startStr} to ${endStr}:`, err);
       return `ERR[_fetchHistoricalRange]: Exception for ${ticker} from ${startStr} to ${endStr} - ${err.toString()} - URL: ${url}`;
     }
+  }
+
+  /**
+   * OPTIMIZATION HELPER: Get the first Tuesday before or on the given date
+   * This aligns weekly data points with Yahoo Finance's data structure for better cache efficiency
+   * 
+   * Examples:
+   * - 2021-11-09 (Tue) → 2021-11-09 (same day)
+   * - 2021-11-12 (Fri) → 2021-11-09 (previous Tuesday)
+   * - 2021-11-08 (Mon) → 2021-11-02 (previous Tuesday)
+   */
+  _getFirstTuesdayBeforeOrOn(date) {
+    const result = new Date(date);
+    result.setHours(0, 0, 0, 0);
+    
+    const dayOfWeek = result.getDay(); // 0=Sunday, 1=Monday, 2=Tuesday, ..., 6=Saturday
+    
+    // Calculate days to subtract to get to the previous (or current) Tuesday
+    // Formula: (dayOfWeek + 5) % 7
+    // Sunday (0): 5 days back, Monday (1): 6 days back, Tuesday (2): 0 days, 
+    // Wednesday (3): 1 day back, Thursday (4): 2 days back, Friday (5): 3 days back, Saturday (6): 4 days back
+    const daysToSubtract = (dayOfWeek + 5) % 7;
+    
+    if (daysToSubtract > 0) {
+      result.setDate(result.getDate() - daysToSubtract);
+    }
+    
+    return result;
   }
 
   /**
@@ -769,5 +807,47 @@ function yahooHistory(ticker, startDateParam, endDateParam) {
 
 
 // All Yahoo Finance functionality is now handled by the YahooFinanceAPI class
+
+/**
+ * Test function to verify Tuesday alignment logic
+ * Run this function to test the _getFirstTuesdayBeforeOrOn helper
+ */
+function testTuesdayAlignment() {
+  const api = new YahooFinanceAPI();
+  
+  // Test cases from user examples
+  const testCases = [
+    { input: "2021-11-09", expected: "2021-11-09", description: "Tuesday → same Tuesday" },
+    { input: "2021-11-12", expected: "2021-11-09", description: "Friday → previous Tuesday" },
+    { input: "2021-11-08", expected: "2021-11-02", description: "Monday → previous Tuesday" },
+    // Additional test cases
+    { input: "2021-11-07", expected: "2021-11-02", description: "Sunday → previous Tuesday" },
+    { input: "2021-11-06", expected: "2021-11-02", description: "Saturday → previous Tuesday" },
+    { input: "2021-11-10", expected: "2021-11-09", description: "Wednesday → previous Tuesday" },
+    { input: "2021-11-11", expected: "2021-11-09", description: "Thursday → previous Tuesday" },
+  ];
+  
+  console.log("Testing Tuesday Alignment Logic:");
+  console.log("================================");
+  
+  let allPassed = true;
+  testCases.forEach((testCase, index) => {
+    const inputDate = new Date(testCase.input);
+    const result = api._getFirstTuesdayBeforeOrOn(inputDate);
+    const resultStr = result.toISOString().split('T')[0];
+    const passed = resultStr === testCase.expected;
+    
+    if (!passed) allPassed = false;
+    
+    const status = passed ? "✓ PASS" : "✗ FAIL";
+    console.log(`${status} Test ${index + 1}: ${testCase.description}`);
+    console.log(`  Input: ${testCase.input}, Expected: ${testCase.expected}, Got: ${resultStr}`);
+  });
+  
+  console.log("================================");
+  console.log(allPassed ? "All tests passed! ✓" : "Some tests failed! ✗");
+  
+  return allPassed;
+}
 
 
