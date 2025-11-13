@@ -488,7 +488,8 @@ class YahooFinanceAPI {
       if (!data.chart?.result?.[0]?.timestamp) {
         const dateStr = date.toDateString();
         console.error(`ERR[_fetchSingleHistoricalDay]: No timestamp data for ${ticker} on ${dateStr}`);
-        return `ERR[_fetchSingleHistoricalDay]: No timestamp data for ${ticker} on ${dateStr} - URL: ${url}`;
+        // return `ERR[_fetchSingleHistoricalDay]: No timestamp data for ${ticker} on ${dateStr} - URL: ${url}`;
+        return -1;
       }
 
       const meta = data.chart.result[0].meta;
@@ -652,7 +653,8 @@ class YahooFinanceAPI {
         const startStr = start.toDateString();
         const endStr = end.toDateString();
         console.error(`ERR[_fetchHistoricalRange]: No timestamp data for ${ticker} from ${startStr} to ${endStr} (interval: ${interval})`);
-        return `ERR[_fetchHistoricalRange]: No timestamp data for ${ticker} from ${startStr} to ${endStr} - URL: ${url}`;
+        // return `ERR[_fetchHistoricalRange]: No timestamp data for ${ticker} from ${startStr} to ${endStr} - URL: ${url}`;
+        return -1;
       }
 
       const meta = data.chart.result[0].meta;
