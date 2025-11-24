@@ -1,0 +1,37 @@
+
+
+* prezentare pe scurt
+ 
+Un google sheets pe care eu il folosesc pentru planificarea, monitorizarea si mentenanta portofoliului meu pe termen lung.
+Sunt destul de mandru de ce am reusit sa fac si cum a iesit si vreau sa il impartasesc cu voi.
+De ce am facut si folosesc aceasta unealta? Fiindca aveam nevoie de o unealta pe care sa il folosesc si sa nu imi ia mai mult de 10 minute o data pe luna pentru a ivnesti. 
+Din nevoia asta, s-au nascut mai multe functionalitati ale excelului:
+* preluare de pret a unui instrument financiar in timp real - Datele sunt actualizate cu o latenta de pana la 2 minute.
+* preluare istorica a unui pret la o anumita data
+* automatizare la maxim a tuturor datelor/calculelor.
+
+Principalele module ale uneltei sunt sub forma de sheet-uri. 
+Summary - locul in care am o privire de ansamblu asupra portofoliului. O evolutie, o compozitie in formate grafice dar si cifre absolute.
+Allocation - modulul care ma ajuta la planificare si unde imi setez compozitia portofoliului
+Rebalance - ma ajuta sa stiu ce anume si cat sa cumpar pentru balansare. Aici am 2 metode de rebalansare. 
+Monitoring - e un extra ajutor sa stiu ce as putea cumpara pentru maximizare a randamentului
+Transactions - unde pun tranzactiile efectuate.
+Mai sunt cateva sheets utilitare dar care nu ma ajuta per-se in analiza lunara.
+
+
+Ok, atunci cred ca o sa va prezint mai in detaliu nitel fiecare modul:
+
+Summary 
+* in partea de sus avem un tabel cu toate simbolurile a caror alocare este diferita de 0 in strategia noastra. 
+* simbolurile sunt definite cu numele lor conform yahoo finance. 
+* cum se poate vedea, avem si companii romanesti. insa toate preturile sunt exprimate in EUR. 
+* graficele au titlu reprezentativ pentru ce fac. *prezinti graficele*
+
+Allocation
+* Doar celulele au input manual, restul sunt automatizate.
+* 
+
+
+Obs: 
+* pe summary avem o celula "Enable graphs" care ajuta daca vrei sa fie mai rapida preluarea de date in cazul in care nu ai nevoie de grafice. 
+* comentarii la celule pentru a explica mai bine ce fac si ca o mica documentare.
