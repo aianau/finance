@@ -1,15 +1,15 @@
 // NEW HELPER FUNCTION FOR CURRENCY CONVERSION
 /**
- * Fetches the exchange rate from a base currency to a target currency (EUR).
+ * Fetches the exchange rate from a base currency to a target currency.
  * @param {string} fromCurrency The currency code to convert from (e.g., "USD").
+ * @param {string} toCurrency The currency code to convert to (e.g., "EUR", "RON").
  * @param {SafeCache} cache The cache instance to use.
  * @return {number|null} The exchange rate, or null if an error occurs.
  */
-function getExchangeRate(fromCurrency, cache) {
-  if (fromCurrency === "EUR") {
+function getExchangeRate(fromCurrency, toCurrency, cache) {
+  if (fromCurrency === toCurrency) {
     return 1; // No conversion needed
   }
-  const toCurrency = "EUR";
   const cacheKey = `rate_${fromCurrency}_${toCurrency}`;
 
   const cached = cache.get(cacheKey);
@@ -19,7 +19,7 @@ function getExchangeRate(fromCurrency, cache) {
   }
 
   // Using fawazahmed0 currency API - provides EUR exchange rates
-  // API returns rates FROM EUR to other currencies, so we need to invert
+  // API returns rates FROM EUR to other currencies
   const url = `https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/eur.min.json`;
 
   try {
@@ -27,28 +27,31 @@ function getExchangeRate(fromCurrency, cache) {
     const data = JSON.parse(res.getContentText());
 
     if (data.eur) {
-      // Convert currency code to lowercase (API uses lowercase keys)
-      const currencyKey = fromCurrency.toLowerCase();
-      const eurToFromRate = data.eur[currencyKey];
+      // Convert currency codes to lowercase (API uses lowercase keys)
+      const fromKey = fromCurrency.toLowerCase();
+      const toKey = toCurrency.toLowerCase();
       
-      if (eurToFromRate) {
-        // The API gives EUR->fromCurrency rate, we need fromCurrency->EUR
-        // So we invert: 1 USD = 1/1.15764704 EUR
-        const rate = 1 / eurToFromRate;
-        console.log(`Fetched exchange rate ${fromCurrency}->${toCurrency}: ${rate} (inverted from EUR->${fromCurrency}: ${eurToFromRate})`);
+      const eurToFromRate = data.eur[fromKey];
+      const eurToToRate = data.eur[toKey];
+      
+      if (eurToFromRate && eurToToRate) {
+        // Convert fromCurrency->toCurrency via EUR
+        // Example: USD->RON = (USD->EUR) * (EUR->RON) = (1/eur.usd) * eur.ron
+        const rate = eurToToRate / eurToFromRate;
+        console.log(`Fetched exchange rate ${fromCurrency}->${toCurrency}: ${rate} (via EUR: ${eurToFromRate}, ${eurToToRate})`);
         // Cache for 1 hour, as rates don't change that frequently
         cache.put(cacheKey, JSON.stringify(rate), 3600);
         return rate;
       } else {
-        console.error(`Currency ${fromCurrency} not found in EUR rates`);
+        console.error(`Currency ${fromCurrency} or ${toCurrency} not found in EUR rates`);
         return null;
       }
     } else {
-      console.error(`Failed to fetch exchange rate for ${fromCurrency} - invalid response format`);
+      console.error(`Failed to fetch exchange rate for ${fromCurrency}->${toCurrency} - invalid response format`);
       return null;
     }
   } catch (err) {
-    console.error("Error fetching exchange rate:", err);
+    console.error(`Error fetching exchange rate ${fromCurrency}->${toCurrency}:`, err);
     return null;
   }
 }
@@ -161,7 +164,7 @@ class SafeCache {
 class YahooFinanceAPI {
   constructor(options = {}) {
     this.cache = new SafeCache(CacheService.getScriptCache(), {
-      version: "14", // Enhanced caching version
+      version: "15", // Enhanced caching version with dynamic currency support
       perUser: true,
       enable: true,
       ...options
@@ -181,14 +184,21 @@ class YahooFinanceAPI {
   /**
    * Get a property for a ticker (supports both single values and arrays)
    * @param {string|Array} ticker - Single ticker or array of tickers
+   * @param {string} targetCurrency - Target currency for conversion (e.g., 'EUR', 'RON')
    * @param {string} property - Property to fetch (e.g., 'regularMarketPrice', 'longName')
    * @return {*} Property value or array of values
    */
-  getProperty(ticker, property) {
+  getProperty(ticker, targetCurrency, property) {
     if (!ticker || !property) {
       console.error(`Invalid ticker: ${ticker} or property: ${property}`);
       return null;
     }
+
+    // Default to EUR if target currency not specified
+    if (!targetCurrency || targetCurrency.trim() === "") {
+      targetCurrency = "EUR";
+    }
+    targetCurrency = targetCurrency.toString().trim().toUpperCase();
 
     // Handle array input (ARRAYFORMULA)
     if (Array.isArray(ticker)) {
@@ -199,24 +209,30 @@ class YahooFinanceAPI {
           results.push([""]);
           continue;
         }
-        const val = this._fetchSingleProperty(t, property);
+        const val = this._fetchSingleProperty(t, targetCurrency, property);
         results.push([val]);
       }
       return results;
     }
 
     // Single ticker case
-    return this._fetchSingleProperty(ticker, property);
+    return this._fetchSingleProperty(ticker, targetCurrency, property);
   }
 
   /**
    * Get historical data for a ticker
    * @param {string} ticker - Ticker symbol
+   * @param {string} targetCurrency - Target currency for conversion (e.g., 'EUR', 'RON')
    * @param {Date} startDate - Start date (optional)
    * @param {Date} endDate - End date (optional)
    * @return {*} Historical price data
    */
-  getHistory(ticker, startDate, endDate) {
+  getHistory(ticker, targetCurrency, startDate, endDate) {
+    // Default to EUR if target currency not specified
+    if (!targetCurrency || targetCurrency.trim() === "") {
+      targetCurrency = "EUR";
+    }
+    targetCurrency = targetCurrency.toString().trim().toUpperCase();
     // console.log("test:");
     // ticker = "IWDA.AS";
     // // ticker = "TLV.RO";
@@ -252,12 +268,12 @@ class YahooFinanceAPI {
 
     // Case 1: Fetching for today's current price
     if (start && !end && start.getTime() === today.getTime()) {
-      return this._fetchTodaysPrice(ticker);
+      return this._fetchTodaysPrice(ticker, targetCurrency);
     }
 
     // Case 2: Single historical day (completed trading day)
     if (start && !end && start.getTime() < today.getTime()) {
-      return this._fetchSingleHistoricalDay(ticker, start);
+      return this._fetchSingleHistoricalDay(ticker, targetCurrency, start);
     }
 
     // Case 3: Historical range or default range
@@ -269,13 +285,13 @@ class YahooFinanceAPI {
       end = new Date(start.getTime() + 24 * 60 * 60 * 1000);
     }
 
-    return this._fetchHistoricalRange(ticker, start, end, !endDate && !!startDate);
+    return this._fetchHistoricalRange(ticker, targetCurrency, start, end, !endDate && !!startDate);
   }
 
   /**
    * Private method to fetch a single property with intelligent caching
    */
-  _fetchSingleProperty(ticker, property) {
+  _fetchSingleProperty(ticker, targetCurrency, property) {
     // First check if we have cached static metadata (30-day cache)
     const staticCacheKey = `static_${ticker}`;
     // If requesting static property we try to get it from cache
@@ -287,18 +303,18 @@ class YahooFinanceAPI {
       if (staticData[property] !== undefined) {
         let value = staticData[property];
         // Get currency from static cache
-        const currency = staticData.currency || "EUR";
+        const currency = staticData.currency || targetCurrency;
         const priceProperties = ['regularMarketPrice', 'regularMarketDayHigh', 'regularMarketDayLow', 
                                  'fiftyTwoWeekHigh', 'fiftyTwoWeekLow', 'previousClose', 'chartPreviousClose'];
         
         // Convert if necessary
-        if (value !== null && priceProperties.includes(property) && currency !== "EUR") {
-          const exchangeRate = getExchangeRate(currency, this.cache);
+        if (value !== null && priceProperties.includes(property) && currency !== targetCurrency) {
+          const exchangeRate = getExchangeRate(currency, targetCurrency, this.cache);
           if (exchangeRate !== null) {
             value = value * exchangeRate;
-            console.log(`Static cache hit for ${ticker}.${property}: ${staticData[property]} ${currency} -> ${value} EUR`);
+            console.log(`Static cache hit for ${ticker}.${property}: ${staticData[property]} ${currency} -> ${value} ${targetCurrency}`);
           } else {
-            console.warn(`Failed to get exchange rate for ${currency} to EUR`);
+            console.warn(`Failed to get exchange rate for ${currency} to ${targetCurrency}`);
             console.log(`Static cache hit for ${ticker}.${property}: ${value} (no conversion)`);
           }
         } else {
@@ -327,18 +343,18 @@ class YahooFinanceAPI {
       if (dynamicData[property] !== undefined) {
         let value = dynamicData[property];
         // Get currency from static cache (dynamic cache doesn't include currency)
-        const currency = staticData?.currency || "EUR";
+        const currency = staticData?.currency || targetCurrency;
         const priceProperties = ['regularMarketPrice', 'regularMarketDayHigh', 'regularMarketDayLow', 
                                  'fiftyTwoWeekHigh', 'fiftyTwoWeekLow', 'previousClose', 'chartPreviousClose'];
         
         // Convert if necessary
-        if (value !== null && priceProperties.includes(property) && currency !== "EUR") {
-          const exchangeRate = getExchangeRate(currency, this.cache);
+        if (value !== null && priceProperties.includes(property) && currency !== targetCurrency) {
+          const exchangeRate = getExchangeRate(currency, targetCurrency, this.cache);
           if (exchangeRate !== null) {
             value = value * exchangeRate;
-            console.log(`Dynamic cache hit for ${ticker}.${property}: ${dynamicData[property]} ${currency} -> ${value} EUR`);
+            console.log(`Dynamic cache hit for ${ticker}.${property}: ${dynamicData[property]} ${currency} -> ${value} ${targetCurrency}`);
           } else {
-            console.warn(`Failed to get exchange rate for ${currency} to EUR`);
+            console.warn(`Failed to get exchange rate for ${currency} to ${targetCurrency}`);
             console.log(`Dynamic cache hit for ${ticker}.${property}: ${value} (no conversion)`);
           }
         } else {
@@ -363,7 +379,7 @@ class YahooFinanceAPI {
       }
 
       const meta = data.chart.result[0].meta;
-      const currency = meta.currency || "EUR"; // Default to EUR if no currency specified
+      const currency = meta.currency || targetCurrency; // Default to target currency if no currency specified
 
       // Cache static data indefinitely (30 days TTL) - only if we don't have it already
       if (!staticData) {
@@ -405,16 +421,16 @@ class YahooFinanceAPI {
         value = staticData[property] ?? dynamicInfo[property] ?? meta[property] ?? null;
       }
 
-      // Convert to EUR if the property is a price-related field
+      // Convert to target currency if the property is a price-related field
       const priceProperties = ['regularMarketPrice', 'regularMarketDayHigh', 'regularMarketDayLow', 
                                'fiftyTwoWeekHigh', 'fiftyTwoWeekLow', 'previousClose', 'chartPreviousClose'];
-      if (value !== null && priceProperties.includes(property) && currency !== "EUR") {
-        const exchangeRate = getExchangeRate(currency, this.cache);
+      if (value !== null && priceProperties.includes(property) && currency !== targetCurrency) {
+        const exchangeRate = getExchangeRate(currency, targetCurrency, this.cache);
         if (exchangeRate !== null) {
           value = value * exchangeRate;
-          console.log(`Converted ${ticker}.${property} from ${currency} to EUR (rate: ${exchangeRate})`);
+          console.log(`Converted ${ticker}.${property} from ${currency} to ${targetCurrency} (rate: ${exchangeRate})`);
         } else {
-          console.warn(`Failed to get exchange rate for ${currency} to EUR`);
+          console.warn(`Failed to get exchange rate for ${currency} to ${targetCurrency}`);
         }
       }
 
@@ -431,7 +447,7 @@ class YahooFinanceAPI {
   /**
    * Private method to fetch today's current market price
    */
-  _fetchTodaysPrice(ticker) {
+  _fetchTodaysPrice(ticker, targetCurrency) {
     // Use the dynamic cache from _fetchSingleProperty for consistency
     const dynamicCacheKey = `dynamic_${ticker}`;
     // Always fetch from dynamic cache since regularMarketPrice is always a dynamic property
@@ -439,23 +455,24 @@ class YahooFinanceAPI {
 
     if (dynamicData) {
       dynamicData = JSON.parse(dynamicData);
-      // if we have it cached, return immediately (already converted to EUR when cached)
+      // if we have it cached, return immediately (conversion handled by _fetchSingleProperty)
       if (dynamicData.regularMarketPrice !== undefined) {
         console.log(`Dynamic cache hit for today's price ${ticker}: ${dynamicData.regularMarketPrice}`);
-        return roundValue(dynamicData.regularMarketPrice);
+        // Need to convert via _fetchSingleProperty to handle currency conversion
+        return this._fetchSingleProperty(ticker, targetCurrency, 'regularMarketPrice');
       }
     }
 
-    // If not in cache, fetch via the enhanced method (which handles EUR conversion)
+    // If not in cache, fetch via the enhanced method (which handles currency conversion)
     console.log(`Fetching today's price for ${ticker} via _fetchSingleProperty`);
-    return this._fetchSingleProperty(ticker, 'regularMarketPrice');
+    return this._fetchSingleProperty(ticker, targetCurrency, 'regularMarketPrice');
   }
 
   /**
    * Private method to fetch and permanently cache a single historical day's closing price
    */
-  _fetchSingleHistoricalDay(ticker, date) {
-    const historicalCacheKey = `hist_day_${ticker}_${date.getTime()}`;
+  _fetchSingleHistoricalDay(ticker, targetCurrency, date) {
+    const historicalCacheKey = `hist_day_${ticker}_${date.getTime()}_${targetCurrency}`;
     const cachedPrice = this.cache.get(historicalCacheKey);
 
     if (cachedPrice) {
@@ -469,7 +486,7 @@ class YahooFinanceAPI {
       const daysToSubtract = isSunday(date) ? 2 : 1;
       prevDay.setDate(date.getDate() - daysToSubtract);
       console.log(`${date.toDateString()} is a weekend, trying ${prevDay.toDateString()} instead.`);
-      return this._fetchSingleHistoricalDay(ticker, prevDay);
+      return this._fetchSingleHistoricalDay(ticker, targetCurrency, prevDay);
     }
 
     // Fetch from API
@@ -493,7 +510,7 @@ class YahooFinanceAPI {
       }
 
       const meta = data.chart.result[0].meta;
-      const currency = meta.currency || "EUR"; // Default to EUR if no currency specified
+      const currency = meta.currency || targetCurrency; // Default to target currency if no currency specified
       const timestamps = data.chart.result[0].timestamp;
       const closes = data.chart.result[0].indicators.quote[0].close;
 
@@ -505,14 +522,14 @@ class YahooFinanceAPI {
 
       let closePrice = closes[0];
 
-      // Convert to EUR if necessary
-      if (currency !== "EUR") {
-        const exchangeRate = getExchangeRate(currency, this.cache);
+      // Convert to target currency if necessary
+      if (currency !== targetCurrency) {
+        const exchangeRate = getExchangeRate(currency, targetCurrency, this.cache);
         if (exchangeRate !== null) {
           closePrice = closePrice * exchangeRate;
-          console.log(`Converted ${ticker} price from ${currency} to EUR (rate: ${exchangeRate})`);
+          console.log(`Converted ${ticker} price from ${currency} to ${targetCurrency} (rate: ${exchangeRate})`);
         } else {
-          console.warn(`Failed to get exchange rate for ${currency} to EUR`);
+          console.warn(`Failed to get exchange rate for ${currency} to ${targetCurrency}`);
         }
       }
 
@@ -535,13 +552,13 @@ class YahooFinanceAPI {
    * Private method to fetch historical close prices with intelligent caching
    * OPTIMIZED with smart intervals and flexible range matching for maximum cache efficiency
    */
-  _fetchHistoricalRange(ticker, start, end, isSingleDayRequest) {
+  _fetchHistoricalRange(ticker, targetCurrency, start, end, isSingleDayRequest) {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
     // For single day requests, use the dedicated single day function
     if (isSingleDayRequest) {
-      return this._fetchSingleHistoricalDay(ticker, start);
+      return this._fetchSingleHistoricalDay(ticker, targetCurrency, start);
     }
 
     // Calculate interval using valid Yahoo Finance intervals
@@ -571,7 +588,7 @@ class YahooFinanceAPI {
     const shouldCheckFlexibleCache = interval === "1wk" || !rangeContainsToday;
 
     if (shouldCheckFlexibleCache) {
-      const cachedData = this._findCachedRangeData(ticker, start, end, interval);
+      const cachedData = this._findCachedRangeData(ticker, targetCurrency, start, end, interval);
       if (cachedData) {
         console.log(`Flexible range cache hit for ${ticker} ${start.toDateString()} to ${end.toDateString()} (${interval})`);
         return cachedData;
@@ -590,7 +607,7 @@ class YahooFinanceAPI {
 
       if (tradingDays.length > 0) {
         // OPTIMIZATION: Batch cache lookup instead of individual calls
-        const cacheKeys = tradingDays.map(day => `hist_day_${ticker}_${day.getTime()}`);
+        const cacheKeys = tradingDays.map(day => `hist_day_${ticker}_${day.getTime()}_${targetCurrency}`);
         const cachedData = this.cache.getAll(cacheKeys);
 
         let allCached = true;
@@ -629,7 +646,7 @@ class YahooFinanceAPI {
           console.log(`Built range from batch cached days for ${ticker}: ${dayResults.length} days`);
 
           // Cache the complete range permanently if it's all historical
-          const cacheKey = `hist_range_${ticker}_${start.getTime()}_${end.getTime()}`;
+          const cacheKey = `hist_range_${ticker}_${start.getTime()}_${end.getTime()}_${targetCurrency}`;
           if (!rangeContainsToday) {
             this.cache.put(cacheKey, JSON.stringify(output), 365 * 24 * 60 * 60); // 1 year
           }
@@ -658,20 +675,20 @@ class YahooFinanceAPI {
       }
 
       const meta = data.chart.result[0].meta;
-      const currency = meta.currency || "EUR"; // Default to EUR if no currency specified
+      const currency = meta.currency || targetCurrency; // Default to target currency if no currency specified
       const timestamps = data.chart.result[0].timestamp;
       const closes = data.chart.result[0].indicators.quote[0].close;
       const output = [["Close"]];
 
       // Get exchange rate if needed (fetch once for all prices)
       let exchangeRate = 1;
-      if (currency !== "EUR") {
-        exchangeRate = getExchangeRate(currency, this.cache);
+      if (currency !== targetCurrency) {
+        exchangeRate = getExchangeRate(currency, targetCurrency, this.cache);
         if (exchangeRate === null) {
-          console.warn(`Failed to get exchange rate for ${currency} to EUR`);
+          console.warn(`Failed to get exchange rate for ${currency} to ${targetCurrency}`);
           exchangeRate = 1; // Fallback to no conversion
         } else {
-          console.log(`Converting ${ticker} historical prices from ${currency} to EUR (rate: ${exchangeRate})`);
+          console.log(`Converting ${ticker} historical prices from ${currency} to ${targetCurrency} (rate: ${exchangeRate})`);
         }
       }
 
@@ -698,7 +715,7 @@ class YahooFinanceAPI {
             // Cache individual historical days permanently (not today)
             dateObj.setHours(0, 0, 0, 0);
             if (dateObj.getTime() < today.getTime()) {
-              const dayKey = `hist_day_${ticker}_${dateObj.getTime()}`;
+              const dayKey = `hist_day_${ticker}_${dateObj.getTime()}_${targetCurrency}`;
               this.cache.put(dayKey, JSON.stringify(price), 365 * 24 * 60 * 60); // 1 year
             }
           }
@@ -709,7 +726,7 @@ class YahooFinanceAPI {
 
       // STEP 5: Cache the range data (no interval in key - it's deterministically calculated)
       if (output.length > 1) {
-        const cacheKey = `hist_range_${ticker}_${start.getTime()}_${end.getTime()}`;
+        const cacheKey = `hist_range_${ticker}_${start.getTime()}_${end.getTime()}_${targetCurrency}`;
         const cacheTtl = rangeContainsToday ? (60 * 60 * 2) : (365 * 24 * 60 * 60); // 2 hours vs 1 year
         this.cache.put(cacheKey, JSON.stringify(output), cacheTtl);
         console.log(`Cached range for ${ticker}: ${output.length - 1} points (${interval}), TTL: ${rangeContainsToday ? '2h' : '1yr'}`);
@@ -775,10 +792,10 @@ class YahooFinanceAPI {
    * OPTIMIZATION HELPER: Find cached range data with flexible matching for large intervals
    * For large ranges, we don't need exact date accuracy, so we check nearby date ranges
    */
-  _findCachedRangeData(ticker, start, end, interval) {
+  _findCachedRangeData(ticker, targetCurrency, start, end, interval) {
     // For small ranges (1d interval), only check exact match
     if (interval === "1d") {
-      const exactKey = `hist_range_${ticker}_${start.getTime()}_${end.getTime()}`;
+      const exactKey = `hist_range_${ticker}_${start.getTime()}_${end.getTime()}_${targetCurrency}`;
       const cached = this.cache.get(exactKey);
       if (cached) {
         console.log(`Exact range cache hit for ${ticker}`);
@@ -800,7 +817,7 @@ class YahooFinanceAPI {
       for (const shift of shifts) {
         const shiftedStart = new Date(start.getTime() + (shift * msPerDay));
         const shiftedEnd = new Date(end.getTime() + (shift * msPerDay));
-        const shiftedKey = `hist_range_${ticker}_${shiftedStart.getTime()}_${shiftedEnd.getTime()}`;
+        const shiftedKey = `hist_range_${ticker}_${shiftedStart.getTime()}_${shiftedEnd.getTime()}_${targetCurrency}`;
 
         const cached = this.cache.get(shiftedKey);
         if (cached) {
@@ -819,10 +836,17 @@ class YahooFinanceAPI {
 const yahooAPI = new YahooFinanceAPI();
 
 /**
- * Example: https://query1.finance.yahoo.com/v8/finance/chart/IWDA.AS
+ * Get a property for a ticker symbol
+ * @param {string|Array} ticker - Ticker symbol (e.g., "IWDA.AS")
+ * @param {string} targetCurrency - Target currency (e.g., from Summary!$U$5)
+ * @param {string} property - Property name (e.g., "regularMarketPrice", "longName")
+ * @return {*} Property value in target currency
+ * @customfunction
+ * 
+ * Example: =yahooF("IWDA.AS", Summary!$U$5, "regularMarketPrice")
  */
-function yahooF(ticker, property) {
-  return yahooAPI.getProperty(ticker, property);
+function yahooF(ticker, targetCurrency, property) {
+  return yahooAPI.getProperty(ticker, targetCurrency, property);
 }
 
 
@@ -855,7 +879,24 @@ function isSunday(date) {
 }
 
 
-function yahooHistory(ticker, startDateParam, endDateParam) {
+/**
+ * Get historical price for a ticker symbol
+ * @param {string|Array} ticker - Ticker symbol (e.g., "IWDA.AS")
+ * @param {string} targetCurrency - Target currency (e.g., from Summary!$U$5)
+ * @param {Date} startDateParam - Start date (optional)
+ * @param {Date} endDateParam - End date (optional)
+ * @return {*} Historical price in target currency
+ * @customfunction
+ * 
+ * Example: =yahooHistory("IWDA.AS", Summary!$U$5, TODAY())
+ */
+function yahooHistory(ticker, targetCurrency, startDateParam, endDateParam) {
+  // Default to EUR if target currency not specified
+  if (!targetCurrency || targetCurrency.trim() === "") {
+    targetCurrency = "EUR";
+  }
+  targetCurrency = targetCurrency.toString().trim().toUpperCase();
+
   // Handle array input (ARRAYFORMULA)
   if (Array.isArray(ticker)) {
     const results = [];
@@ -881,15 +922,15 @@ function yahooHistory(ticker, startDateParam, endDateParam) {
         endDate = endDateParam;
       }
       
-      const val = yahooAPI.getHistory(t, startDate, endDate);
+      const val = yahooAPI.getHistory(t, targetCurrency, startDate, endDate);
       
       // Handle different return types from getHistory
       // If it returns an array (historical range), extract the last price value
       if (Array.isArray(val)) {
-        // Array format: [["Date", "Close"], [date1, price1], ...]
+        // Array format: [["Close"], [price1], ...]
         // Return the last price value (most recent)
         if (val.length > 1) {
-          const lastPrice = val[val.length - 1][1];
+          const lastPrice = val[val.length - 1][0];
           results.push([lastPrice]);
         } else {
           results.push([""]);
@@ -903,7 +944,7 @@ function yahooHistory(ticker, startDateParam, endDateParam) {
   }
   
   // Single ticker case
-  return yahooAPI.getHistory(ticker, startDateParam, endDateParam);
+  return yahooAPI.getHistory(ticker, targetCurrency, startDateParam, endDateParam);
 }
 
 
