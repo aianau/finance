@@ -1,0 +1,8 @@
+00:00 Prezentare generala
+01:06 Module
+02:12 Summary
+05:07 Allocation
+06:56 Rebalance
+08:24 Monitoring
+09:38 Transactions
+10:43 Incheiere
