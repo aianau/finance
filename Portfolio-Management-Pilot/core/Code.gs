@@ -72,9 +72,22 @@ function roundValue(value) {
 // Helper: convert Sheets date serial or JS Date
 function sheetDateToJS(dateValue) {
   if (!dateValue) return null;
-  if (dateValue instanceof Date) return dateValue;
+
+  // FIX: Robust check for Date objects (handles cross-library boundary issues)
+  // instanceof Date can fail if the object comes from a different execution context
+  // We check for the existence of .getTime() which is standard for Dates
+  if (dateValue instanceof Date || (typeof dateValue === 'object' && typeof dateValue.getTime === 'function')) {
+    return dateValue;
+  }
+
   // Sheets counts days from 1899-12-30, JS from 1970-01-01
-  return new Date((dateValue - 25569) * 24 * 60 * 60 * 1000);
+  // Only treat as serial number if it is strictly a number
+  if (typeof dateValue === 'number') {
+    return new Date((dateValue - 25569) * 24 * 60 * 60 * 1000);
+  }
+  
+  // Fallback: try parsing as string (e.g., "2023-01-01") or return as is to let new Date() handle it
+  return new Date(dateValue);
 }
 
 function isWeekend(date) {
@@ -254,6 +267,8 @@ class YahooFinanceAPI {
    * @return {*} Historical price data
    */
   getHistory(ticker, targetCurrency, startDate, endDate) {
+    console.log(`getHistory: Got request to get history ${ticker}, ${targetCurrency} for ${startDate}->${endDate}.`);
+
     // Default to EUR if target currency not specified
     if (!targetCurrency || targetCurrency.trim() === "") {
       targetCurrency = "EUR";
@@ -291,7 +306,7 @@ class YahooFinanceAPI {
 
     let start = startDate ? sheetDateToJS(startDate) : null;
     let end = endDate ? sheetDateToJS(endDate) : null;
-
+    console.log(`start: ${start}, type(start): ${typeof start}, startDate: ${startDate}`);
     // Case 1: Fetching for today's current price
     if (start && !end && start.getTime() === today.getTime()) {
       return this._fetchTodaysPrice(ticker, targetCurrency);
@@ -315,6 +330,7 @@ class YahooFinanceAPI {
   }
 
   yahooHistory(ticker, targetCurrency, startDateParam, endDateParam) {
+    console.log(`yahooHistory: Got request to yahoo historical ${ticker}, ${targetCurrency} for ${startDateParam}->${endDateParam}.`);
 
     // Default to EUR if target currency not specified
     if (!targetCurrency || targetCurrency.trim() === "") {
@@ -556,6 +572,7 @@ class YahooFinanceAPI {
    * Private method to fetch and permanently cache a single historical day's closing price
    */
   _fetchSingleHistoricalDay(ticker, targetCurrency, date) {
+    console.log(`_fetchSingleHistoricalDay: Got request to fetch single historical day ${ticker} for ${date.toDateString()}`);
     const historicalCacheKey = `hist_day_${ticker}_${date.getTime()}_${targetCurrency}`;
     const cachedPrice = this.cache.get(historicalCacheKey);
 
@@ -637,6 +654,8 @@ class YahooFinanceAPI {
    * OPTIMIZED with smart intervals and flexible range matching for maximum cache efficiency
    */
   _fetchHistoricalRange(ticker, targetCurrency, start, end, isSingleDayRequest) {
+    console.log(`_fetchHistoricalRange: Got request to fetch historical range ${ticker}, ${targetCurrency} for ${start}->${end}.`);
+    
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
