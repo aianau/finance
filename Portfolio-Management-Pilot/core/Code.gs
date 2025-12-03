@@ -30,10 +30,10 @@ function getExchangeRate(fromCurrency, toCurrency, cache) {
       // Convert currency codes to lowercase (API uses lowercase keys)
       const fromKey = fromCurrency.toLowerCase();
       const toKey = toCurrency.toLowerCase();
-      
+
       const eurToFromRate = data.eur[fromKey];
       const eurToToRate = data.eur[toKey];
-      
+
       if (eurToFromRate && eurToToRate) {
         // Convert fromCurrency->toCurrency via EUR
         // Example: USD->RON = (USD->EUR) * (EUR->RON) = (1/eur.usd) * eur.ron
@@ -68,6 +68,45 @@ function roundValue(value) {
   }
   return value != null ? Math.round(number * 100) / 100 : null;
 }
+
+// Helper: convert Sheets date serial or JS Date
+function sheetDateToJS(dateValue) {
+  if (!dateValue) return null;
+
+  // FIX: Robust check for Date objects (handles cross-library boundary issues)
+  // instanceof Date can fail if the object comes from a different execution context
+  // We check for the existence of .getTime() which is standard for Dates
+  if (dateValue instanceof Date || (typeof dateValue === 'object' && typeof dateValue.getTime === 'function')) {
+    return dateValue;
+  }
+
+  // Sheets counts days from 1899-12-30, JS from 1970-01-01
+  // Only treat as serial number if it is strictly a number
+  if (typeof dateValue === 'number') {
+    return new Date((dateValue - 25569) * 24 * 60 * 60 * 1000);
+  }
+  
+  // Fallback: try parsing as string (e.g., "2023-01-01") or return as is to let new Date() handle it
+  return new Date(dateValue);
+}
+
+function isWeekend(date) {
+  if (!(date instanceof Date)) return false; // handle invalid input
+  const day = date.getDay(); // 0 = Sunday, 6 = Saturday
+  return day === 0 || day === 6;
+}
+function isSaturday(date) {
+  if (!(date instanceof Date)) return false; // handle invalid input
+  const day = date.getDay(); // 0 = Sunday, 6 = Saturday
+  return day === 6;
+}
+function isSunday(date) {
+  if (!(date instanceof Date)) return false; // handle invalid input
+  const day = date.getDay(); // 0 = Sunday, 6 = Saturday
+  return day === 0;
+}
+
+
 
 /**
  * SafeCache - versioned, user-aware, optionally disabled cache wrapper
@@ -228,6 +267,8 @@ class YahooFinanceAPI {
    * @return {*} Historical price data
    */
   getHistory(ticker, targetCurrency, startDate, endDate) {
+    console.log(`getHistory: Got request to get history ${ticker}, ${targetCurrency} for ${startDate}->${endDate}.`);
+
     // Default to EUR if target currency not specified
     if (!targetCurrency || targetCurrency.trim() === "") {
       targetCurrency = "EUR";
@@ -265,7 +306,7 @@ class YahooFinanceAPI {
 
     let start = startDate ? sheetDateToJS(startDate) : null;
     let end = endDate ? sheetDateToJS(endDate) : null;
-
+    console.log(`start: ${start}, type(start): ${typeof start}, startDate: ${startDate}`);
     // Case 1: Fetching for today's current price
     if (start && !end && start.getTime() === today.getTime()) {
       return this._fetchTodaysPrice(ticker, targetCurrency);
@@ -288,6 +329,65 @@ class YahooFinanceAPI {
     return this._fetchHistoricalRange(ticker, targetCurrency, start, end, !endDate && !!startDate);
   }
 
+  yahooHistory(ticker, targetCurrency, startDateParam, endDateParam) {
+    console.log(`yahooHistory: Got request to yahoo historical ${ticker}, ${targetCurrency} for ${startDateParam}->${endDateParam}.`);
+
+    // Default to EUR if target currency not specified
+    if (!targetCurrency || targetCurrency.trim() === "") {
+      targetCurrency = "EUR";
+    }
+    targetCurrency = targetCurrency.toString().trim().toUpperCase();
+
+    // Handle array input (ARRAYFORMULA)
+    if (Array.isArray(ticker)) {
+      const results = [];
+      for (let i = 0; i < ticker.length; i++) {
+        const t = ticker[i][0];
+        if (!t) {
+          results.push([""]);
+          continue;
+        }
+
+        // Extract startDate and endDate from array if provided
+        let startDate = null;
+        let endDate = null;
+        if (Array.isArray(startDateParam) && startDateParam[i] && startDateParam[i][0] !== undefined && startDateParam[i][0] !== "") {
+          startDate = startDateParam[i][0];
+        } else if (!Array.isArray(startDateParam) && startDateParam !== undefined && startDateParam !== "") {
+          startDate = startDateParam;
+        }
+
+        if (Array.isArray(endDateParam) && endDateParam[i] && endDateParam[i][0] !== undefined && endDateParam[i][0] !== "") {
+          endDate = endDateParam[i][0];
+        } else if (!Array.isArray(endDateParam) && endDateParam !== undefined && endDateParam !== "") {
+          endDate = endDateParam;
+        }
+
+        const val = this.getHistory(t, targetCurrency, startDate, endDate);
+
+        // Handle different return types from getHistory
+        // If it returns an array (historical range), extract the last price value
+        if (Array.isArray(val)) {
+          // Array format: [["Close"], [price1], ...]
+          // Return the last price value (most recent)
+          if (val.length > 1) {
+            const lastPrice = val[val.length - 1][0];
+            results.push([lastPrice]);
+          } else {
+            results.push([""]);
+          }
+        } else {
+          // Single value (number or error string)
+          results.push([val]);
+        }
+      }
+      return results;
+    }
+
+    // Single ticker case
+    return this.getHistory(ticker, targetCurrency, startDateParam, endDateParam);
+  }
+
   /**
    * Private method to fetch a single property with intelligent caching
    */
@@ -304,9 +404,9 @@ class YahooFinanceAPI {
         let value = staticData[property];
         // Get currency from static cache
         const currency = staticData.currency || targetCurrency;
-        const priceProperties = ['regularMarketPrice', 'regularMarketDayHigh', 'regularMarketDayLow', 
-                                 'fiftyTwoWeekHigh', 'fiftyTwoWeekLow', 'previousClose', 'chartPreviousClose'];
-        
+        const priceProperties = ['regularMarketPrice', 'regularMarketDayHigh', 'regularMarketDayLow',
+          'fiftyTwoWeekHigh', 'fiftyTwoWeekLow', 'previousClose', 'chartPreviousClose'];
+
         // Convert if necessary
         if (value !== null && priceProperties.includes(property) && currency !== targetCurrency) {
           const exchangeRate = getExchangeRate(currency, targetCurrency, this.cache);
@@ -328,7 +428,7 @@ class YahooFinanceAPI {
     const dynamicCacheKey = `dynamic_${ticker}`;
     // If requesting dynamic property we try to get it from cache
     let dynamicData = this.dynamicProperties.includes(property) ? this.cache.get(dynamicCacheKey) : null;
-    
+
     // Also try to get static data for currency info (if not already loaded)
     if (dynamicData && !staticData) {
       staticData = this.cache.get(staticCacheKey);
@@ -344,9 +444,9 @@ class YahooFinanceAPI {
         let value = dynamicData[property];
         // Get currency from static cache (dynamic cache doesn't include currency)
         const currency = staticData?.currency || targetCurrency;
-        const priceProperties = ['regularMarketPrice', 'regularMarketDayHigh', 'regularMarketDayLow', 
-                                 'fiftyTwoWeekHigh', 'fiftyTwoWeekLow', 'previousClose', 'chartPreviousClose'];
-        
+        const priceProperties = ['regularMarketPrice', 'regularMarketDayHigh', 'regularMarketDayLow',
+          'fiftyTwoWeekHigh', 'fiftyTwoWeekLow', 'previousClose', 'chartPreviousClose'];
+
         // Convert if necessary
         if (value !== null && priceProperties.includes(property) && currency !== targetCurrency) {
           const exchangeRate = getExchangeRate(currency, targetCurrency, this.cache);
@@ -422,8 +522,8 @@ class YahooFinanceAPI {
       }
 
       // Convert to target currency if the property is a price-related field
-      const priceProperties = ['regularMarketPrice', 'regularMarketDayHigh', 'regularMarketDayLow', 
-                               'fiftyTwoWeekHigh', 'fiftyTwoWeekLow', 'previousClose', 'chartPreviousClose'];
+      const priceProperties = ['regularMarketPrice', 'regularMarketDayHigh', 'regularMarketDayLow',
+        'fiftyTwoWeekHigh', 'fiftyTwoWeekLow', 'previousClose', 'chartPreviousClose'];
       if (value !== null && priceProperties.includes(property) && currency !== targetCurrency) {
         const exchangeRate = getExchangeRate(currency, targetCurrency, this.cache);
         if (exchangeRate !== null) {
@@ -472,6 +572,7 @@ class YahooFinanceAPI {
    * Private method to fetch and permanently cache a single historical day's closing price
    */
   _fetchSingleHistoricalDay(ticker, targetCurrency, date) {
+    console.log(`_fetchSingleHistoricalDay: Got request to fetch single historical day ${ticker} for ${date.toDateString()}`);
     const historicalCacheKey = `hist_day_${ticker}_${date.getTime()}_${targetCurrency}`;
     const cachedPrice = this.cache.get(historicalCacheKey);
 
@@ -553,6 +654,8 @@ class YahooFinanceAPI {
    * OPTIMIZED with smart intervals and flexible range matching for maximum cache efficiency
    */
   _fetchHistoricalRange(ticker, targetCurrency, start, end, isSingleDayRequest) {
+    console.log(`_fetchHistoricalRange: Got request to fetch historical range ${ticker}, ${targetCurrency} for ${start}->${end}.`);
+    
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
@@ -754,19 +857,19 @@ class YahooFinanceAPI {
   _getFirstTuesdayBeforeOrOn(date) {
     const result = new Date(date);
     result.setHours(0, 0, 0, 0);
-    
+
     const dayOfWeek = result.getDay(); // 0=Sunday, 1=Monday, 2=Tuesday, ..., 6=Saturday
-    
+
     // Calculate days to subtract to get to the previous (or current) Tuesday
     // Formula: (dayOfWeek + 5) % 7
     // Sunday (0): 5 days back, Monday (1): 6 days back, Tuesday (2): 0 days, 
     // Wednesday (3): 1 day back, Thursday (4): 2 days back, Friday (5): 3 days back, Saturday (6): 4 days back
     const daysToSubtract = (dayOfWeek + 5) % 7;
-    
+
     if (daysToSubtract > 0) {
       result.setDate(result.getDate() - daysToSubtract);
     }
-    
+
     return result;
   }
 
@@ -835,6 +938,7 @@ class YahooFinanceAPI {
 // Global instance - single cache instance shared across all calls
 const yahooAPI = new YahooFinanceAPI();
 
+
 /**
  * Get a property for a ticker symbol
  * @param {string|Array} ticker - Ticker symbol (e.g., "IWDA.AS")
@@ -846,36 +950,14 @@ const yahooAPI = new YahooFinanceAPI();
  * Example: =yahooF("IWDA.AS", Summary!$U$5, "regularMarketPrice")
  */
 function yahooF(ticker, targetCurrency, property) {
+  // --- START PROTECTION BLOCK ---
+  // var licenseStatus = isUserLicensed();
+
+  // if (licenseStatus === "Auth Required") return "Error: Run 'Authorize' menu first.";
+  // if (licenseStatus === "Invalid") return "Error: License Expired or Unpaid.";
+  // --- END PROTECTION BLOCK ---
+
   return yahooAPI.getProperty(ticker, targetCurrency, property);
-}
-
-
-
-
-
-
-// Helper: convert Sheets date serial or JS Date
-function sheetDateToJS(dateValue) {
-  if (!dateValue) return null;
-  if (dateValue instanceof Date) return dateValue;
-  // Sheets counts days from 1899-12-30, JS from 1970-01-01
-  return new Date((dateValue - 25569) * 24 * 60 * 60 * 1000);
-}
-
-function isWeekend(date) {
-  if (!(date instanceof Date)) return false; // handle invalid input
-  const day = date.getDay(); // 0 = Sunday, 6 = Saturday
-  return day === 0 || day === 6;
-}
-function isSaturday(date) {
-  if (!(date instanceof Date)) return false; // handle invalid input
-  const day = date.getDay(); // 0 = Sunday, 6 = Saturday
-  return day === 6;
-}
-function isSunday(date) {
-  if (!(date instanceof Date)) return false; // handle invalid input
-  const day = date.getDay(); // 0 = Sunday, 6 = Saturday
-  return day === 0;
 }
 
 
@@ -891,60 +973,14 @@ function isSunday(date) {
  * Example: =yahooHistory("IWDA.AS", Summary!$U$5, TODAY())
  */
 function yahooHistory(ticker, targetCurrency, startDateParam, endDateParam) {
-  // Default to EUR if target currency not specified
-  if (!targetCurrency || targetCurrency.trim() === "") {
-    targetCurrency = "EUR";
-  }
-  targetCurrency = targetCurrency.toString().trim().toUpperCase();
+  // --- START PROTECTION BLOCK ---
+  // var licenseStatus = isUserLicensed();
 
-  // Handle array input (ARRAYFORMULA)
-  if (Array.isArray(ticker)) {
-    const results = [];
-    for (let i = 0; i < ticker.length; i++) {
-      const t = ticker[i][0];
-      if (!t) {
-        results.push([""]);
-        continue;
-      }
-      
-      // Extract startDate and endDate from array if provided
-      let startDate = null;
-      let endDate = null;
-      if (Array.isArray(startDateParam) && startDateParam[i] && startDateParam[i][0] !== undefined && startDateParam[i][0] !== "") {
-        startDate = startDateParam[i][0];
-      } else if (!Array.isArray(startDateParam) && startDateParam !== undefined && startDateParam !== "") {
-        startDate = startDateParam;
-      }
-      
-      if (Array.isArray(endDateParam) && endDateParam[i] && endDateParam[i][0] !== undefined && endDateParam[i][0] !== "") {
-        endDate = endDateParam[i][0];
-      } else if (!Array.isArray(endDateParam) && endDateParam !== undefined && endDateParam !== "") {
-        endDate = endDateParam;
-      }
-      
-      const val = yahooAPI.getHistory(t, targetCurrency, startDate, endDate);
-      
-      // Handle different return types from getHistory
-      // If it returns an array (historical range), extract the last price value
-      if (Array.isArray(val)) {
-        // Array format: [["Close"], [price1], ...]
-        // Return the last price value (most recent)
-        if (val.length > 1) {
-          const lastPrice = val[val.length - 1][0];
-          results.push([lastPrice]);
-        } else {
-          results.push([""]);
-        }
-      } else {
-        // Single value (number or error string)
-        results.push([val]);
-      }
-    }
-    return results;
-  }
-  
-  // Single ticker case
-  return yahooAPI.getHistory(ticker, targetCurrency, startDateParam, endDateParam);
+  // if (licenseStatus === "Auth Required") return "Error: Run 'Authorize' menu first.";
+  // if (licenseStatus === "Invalid") return "Error: License Expired or Unpaid.";
+  // --- END PROTECTION BLOCK ---
+
+  return yahooAPI.yahooHistory(ticker, targetCurrency, startDateParam, endDateParam);
 }
 
 
@@ -957,7 +993,7 @@ function yahooHistory(ticker, targetCurrency, startDateParam, endDateParam) {
  */
 function testTuesdayAlignment() {
   const api = new YahooFinanceAPI();
-  
+
   // Test cases from user examples
   const testCases = [
     { input: "2021-11-09", expected: "2021-11-09", description: "Tuesday → same Tuesday" },
@@ -969,27 +1005,27 @@ function testTuesdayAlignment() {
     { input: "2021-11-10", expected: "2021-11-09", description: "Wednesday → previous Tuesday" },
     { input: "2021-11-11", expected: "2021-11-09", description: "Thursday → previous Tuesday" },
   ];
-  
+
   console.log("Testing Tuesday Alignment Logic:");
   console.log("================================");
-  
+
   let allPassed = true;
   testCases.forEach((testCase, index) => {
     const inputDate = new Date(testCase.input);
     const result = api._getFirstTuesdayBeforeOrOn(inputDate);
     const resultStr = result.toISOString().split('T')[0];
     const passed = resultStr === testCase.expected;
-    
+
     if (!passed) allPassed = false;
-    
+
     const status = passed ? "✓ PASS" : "✗ FAIL";
     console.log(`${status} Test ${index + 1}: ${testCase.description}`);
     console.log(`  Input: ${testCase.input}, Expected: ${testCase.expected}, Got: ${resultStr}`);
   });
-  
+
   console.log("================================");
   console.log(allPassed ? "All tests passed! ✓" : "Some tests failed! ✗");
-  
+
   return allPassed;
 }
 
