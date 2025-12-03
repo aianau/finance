@@ -1,8 +1,10 @@
+Portfolio Management Pilot - prezentare
+
 00:00 Prezentare generala
-01:06 Module
-02:12 Summary
-05:07 Allocation
-06:56 Rebalance
-08:24 Monitoring
-09:38 Transactions
-10:43 Incheiere
+00:50 Module
+01:45 Summary
+05:09 Allocation
+07:05 Rebalance
+08:37 Monitoring
+10:06 Transactions
+11:11 Incheiere

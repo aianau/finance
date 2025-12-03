@@ -13,3 +13,20 @@ functionalitati:
 * Toate calculele din summary, Allocation, Rebalance, Monitoring se actualizeaza cand introduci o tranzactie in Transactions
 * capacitatea de a personaliza si mai mult cum vrei tu google sheet-ul.
 ```
+
+
+```
+Features:
+* Real-time financial instrument price tracking: Data is updated with a latency of up to 2 minutes.
+* Historical price retrieval for specific dates.
+* Full automation of all data and calculations.
+* Minimal manual data entry: You only need to input your transactions and desired portfolio allocation; everything else is calculated automatically.
+* Charts: Portfolio value over time, portfolio cost basis over time, returns (Unrealized P/L%), Market Value Distribution (Pie Chart), and Ideal vs. Current Allocation (Histogram).
+* Summary Page: An overview of the entire portfolio. It displays evolution and composition using both visual charts and absolute figures.
+* Allocation Page: A planning module where you define your target portfolio composition.
+* Rebalance: Helps identify exactly what and how much to buy to rebalance the portfolio. This feature includes two rebalancing methods.
+* Monitoring: An auxiliary tool to help identify potential purchases to maximize returns.
+* Transactions: The input log for executed transactions and historical records. It includes return calculations for every "Sell" transaction.
+* Dynamic Updates: All calculations in the Summary, Allocation, Rebalance, and Monitoring sections update automatically when a new entry is added to Transactions.
+* Customization: Full capability to further customize the Google Sheet to your specific needs.
+```
